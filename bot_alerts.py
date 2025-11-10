@@ -29,7 +29,7 @@ MINUTE_OFFSET = 0
 
 PAIRS = {
     "EURUSD": "EURUSD=X",
-    "XAUUSD": "XAUUSD=X"
+    "XAUUSD": "GC=F"
 }
 
 EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
