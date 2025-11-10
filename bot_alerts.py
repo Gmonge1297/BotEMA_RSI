@@ -27,10 +27,13 @@ CHECK_INTERVAL_SECONDS = 60
 TIMEFRAME_MINUTES = 60
 MINUTE_OFFSET = 0
 
-PAIRS = {
-    "EURUSD": "EURUSD=X",
-    "XAUUSD": "GC=F"
-}
+pairs = [
+    "EURUSD=X",   # Euro / Dólar estadounidense
+    "GBPUSD=X",   # Libra esterlina / Dólar estadounidense
+    "USDJPY=X",   # Dólar estadounidense / Yen japonés
+    "GC=F"        # Futuro del oro (Gold Futures)
+]
+
 
 EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
