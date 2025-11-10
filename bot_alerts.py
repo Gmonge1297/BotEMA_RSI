@@ -186,7 +186,7 @@ def main_loop():
         ws = None
 
     while True:
-        for label, yf_symbol in PAIRS.items():
+        for label, yf_symbol in pairs.items():
             analyze_pair(label, yf_symbol, ws)
         time.sleep(CHECK_INTERVAL_SECONDS)
 
