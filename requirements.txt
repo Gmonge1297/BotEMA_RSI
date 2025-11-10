@@ -11,3 +11,4 @@ schedule
 python-dotenv
 yagmail
 gspread
+oauth2client
