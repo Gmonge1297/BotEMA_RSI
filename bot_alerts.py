@@ -11,6 +11,13 @@ import json
 from oauth2client.service_account import ServiceAccountCredentials
 import pytz
 import os
+from dotenv import load_dotenv  # 👈 NUEVO
+
+# Cargar variables desde el archivo .env
+load_dotenv()
+
+EMAIL_USER = os.getenv("EMAIL_USER")
+EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 
 # ---------- Configuración general ----------
 CR_TZ = pytz.timezone("America/Costa_Rica")
