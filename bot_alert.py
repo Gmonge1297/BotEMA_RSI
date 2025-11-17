@@ -1,17 +1,33 @@
-import yfinance as yf
 import pandas as pd
 import numpy as np
+import yfinance as yf
 import datetime as dt
 import pytz
+import os
 import smtplib
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
 from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
-# ---------- CONFIGURACIÓN GENERAL ----------
+# ---------- VARIABLES DE ENTORNO ----------
+EMAIL_USER = os.getenv("EMAIL_USER")
+EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
+EMAIL_TO = os.getenv("EMAIL_TO")
+
+# ---------- PARÁMETROS DE ESTRATEGIA ----------
 CR_TZ = pytz.timezone("America/Costa_Rica")
-MAX_RISK_USD = 10  # Riesgo fijo por operación
-RISK_PER_TRADE = 0.01  # Riesgo 1%
+
+EMA_FAST = 20
+EMA_SLOW = 50
+RSI_PERIOD = 14
+
+RSI_BUY = 55
+RSI_SELL = 45
+
+SL_PIPS = 300
+TP_PIPS = 600
+MAX_RISK_USD = 1.5
+
+TIMEFRAME_MINUTES = 60
 
 pairs = {
     "EURUSD": "EURUSD=X",
@@ -20,142 +36,162 @@ pairs = {
     "XAUUSD": "GC=F"
 }
 
-# ---------- CONEXIÓN A GOOGLE SHEETS ----------
-def init_sheets():
-    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
-    client = gspread.authorize(creds)
-    sheet = client.open("ForexBot_Log")
-    return sheet.sheet1
+# ---------- INDICADORES ----------
+def ema(series, span):
+    return series.ewm(span=span, adjust=False).mean()
 
-def log_to_sheet(ws, row):
-    ws.append_row(row)
-
-
-# ---------- ENVÍO DE CORREOS ----------
-def send_email(subject, body):
-    sender = "TU_CORREO@gmail.com"
-    app_password = "TU_CLAVE_DE_APLICACION"
-    receiver = "TU_CORREO@gmail.com"
-
-    msg = MIMEText(body)
-    msg["Subject"] = subject
-    msg["From"] = sender
-    msg["To"] = receiver
-
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
-        smtp.login(sender, app_password)
-        smtp.send_message(msg)
-
-
-# ---------- CÁLCULO DE INDICADORES ----------
-def calc_indicators(df):
-    df["EMA20"] = df["Close"].ewm(span=20).mean()
-    df["EMA50"] = df["Close"].ewm(span=50).mean()
-
-    delta = df["Close"].diff()
+def rsi(series, period=14):
+    delta = series.diff()
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(14).mean()
-    avg_loss = pd.Series(loss).rolling(14).mean()
+    avg_gain = pd.Series(gain).rolling(window=period).mean()
+    avg_loss = pd.Series(loss).rolling(window=period).mean()
     rs = avg_gain / avg_loss
-    df["RSI"] = 100 - (100 / (1 + rs))
+    rsi_series = 100 - (100 / (1 + rs))
+    return rsi_series
 
-    return df
-
-
-# ---------- LÓGICA DE SEÑALES ----------
-def analyze_pair(label, symbol, ws):
+# ---------- ENVÍO DE CORREO ----------
+def send_email(subject, body):
     try:
-        data = yf.download(symbol, period="3d", interval="1h")
-    except:
-        print(f"Error al descargar datos para {label}")
-        return False
+        msg = MIMEMultipart()
+        msg["From"] = EMAIL_USER
+        msg["To"] = EMAIL_TO
+        msg["Subject"] = subject
+        msg.attach(MIMEText(body, "plain"))
 
-    if len(data) < 60:
-        print(f"Sin datos suficientes para {label}")
-        return False
+        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server.starttls()
+        server.login(EMAIL_USER, EMAIL_PASSWORD)
+        server.send_message(msg)
+        server.quit()
+        print("Correo enviado:", subject)
+    except Exception as e:
+        print("Error enviando correo:", e)
 
-    df = calc_indicators(data)
-    close = df["Close"].iloc[-1]
-    ema20 = df["EMA20"].iloc[-1]
-    ema50 = df["EMA50"].iloc[-1]
-    rsi_last = df["RSI"].iloc[-1]
+# ---------- PIP VALUE / RIESGO ----------
+def pip_value(symbol):
+    return 0.01 if "XAU" in symbol else 0.0001
 
-    prev_close = df["Close"].iloc[-2]
-    prev_ema20 = df["EMA20"].iloc[-2]
-    prev_ema50 = df["EMA50"].iloc[-2]
+def calculate_lot_for_risk(entry, sl, max_risk, symbol):
+    pip = pip_value(symbol)
+    sl_pips = abs((entry - sl) / pip)
+    if sl_pips == 0:
+        return 0.01
+    value_per_pip_per_0_01 = 0.10
+    lot = max_risk / (sl_pips * value_per_pip_per_0_01)
+    return max(round(lot, 2), 0.01)
 
-    # ======= REGLAS DE COMPRA (BUY) =======
-    buy_signal = (
-        prev_close < prev_ema20 and close > ema20 and  # ruptura confirmada
-        ema20 > ema50 and                              # EMA20 encima de EMA50
-        48 <= rsi_last <= 60                           # RSI saludable sin sobrecompra
+# ---------- DESCARGA DE DATOS ----------
+def fetch_ohlc_yf(symbol, period_minutes=60):
+    try:
+        df = yf.download(symbol, period="7d", interval=f"{period_minutes}m")
+        if df.empty:
+            return pd.DataFrame()
+        df = df.rename(columns={
+            "Open":"open",
+            "High":"high",
+            "Low":"low",
+            "Close":"close",
+            "Volume":"volume"
+        })
+        return df
+    except Exception as e:
+        print("Error al descargar datos:", e)
+        return pd.DataFrame()
+
+# ---------- ESTRATEGIA CON VELA DE CONFIRMACIÓN ----------
+def analyze_pair(label, yf_symbol):
+    print(f"Descargando datos de {label}...")
+
+    df = fetch_ohlc_yf(yf_symbol)
+    if df.empty or len(df) < 60:
+        print("Sin datos suficientes.")
+        return
+
+    close = df["close"]
+    openv = df["open"]
+
+    ema_fast = ema(close, EMA_FAST)
+    ema_slow = ema(close, EMA_SLOW)
+    rsi_series = rsi(close, RSI_PERIOD)
+
+    # velas prev_prev = -3, prev = -2, last = -1
+    f2 = ema_fast.iat[-3]
+    s2 = ema_slow.iat[-3]
+    f1 = ema_fast.iat[-2]
+    s1 = ema_slow.iat[-2]
+    fl = ema_fast.iat[-1]
+    sl = ema_slow.iat[-1]
+
+    close1 = close.iat[-2]
+    close_last = close.iat[-1]
+    open_last = openv.iat[-1]
+
+    rsi_last = rsi_series.iat[-1]
+
+    # Cruces detectados en vela anterior
+    cross_up_prev = (f2 <= s2) and (f1 > s1)
+    cross_dn_prev = (f2 >= s2) and (f1 < s1)
+
+    # Confirmación estricta en vela actual
+    buy_confirm = (
+        close_last > open_last and
+        close_last > fl and close_last > sl and
+        rsi_last > RSI_BUY
     )
 
-    # ======= REGLAS DE VENTA (SELL) =======
-    sell_signal = (
-        prev_close > prev_ema20 and close < ema20 and  # ruptura confirmada
-        ema20 < ema50 and                              # EMA20 debajo de EMA50
-        40 <= rsi_last <= 52                           # RSI bajista sin sobreventa
+    sell_confirm = (
+        close_last < open_last and
+        close_last < fl and close_last < sl and
+        rsi_last < RSI_SELL
     )
 
-    # ==== TP / SL AUTOMÁTICOS (1:2) ====
-    if buy_signal:
-        sl = close - (abs(close - ema20) * 2)
-        tp = close + (abs(close - ema20) * 4)
-        lot = round(MAX_RISK_USD / abs(close - sl), 2)
+    # ---- BUY ----
+    if cross_up_prev and buy_confirm:
+        entry = float(close_last)
+        slv = entry - SL_PIPS * pip_value(yf_symbol)
+        tpv = entry + TP_PIPS * pip_value(yf_symbol)
+        lot = calculate_lot_for_risk(entry, slv, MAX_RISK_USD, yf_symbol)
 
-        msg = f"""
-BUY Confirmado en {label}
-Entrada: {close}
-SL: {sl}
-TP: {tp}
+        msg = f"""📈 Señal CONFIRMADA BUY {label}
+
+Entrada: {entry}
+SL: {slv}
+TP: {tpv}
 RSI: {rsi_last:.1f}
 Riesgo: ${MAX_RISK_USD}
 Lote sugerido: {lot}
 """
+
         send_email(f"BUY Confirmado {label}", msg)
-        log_to_sheet(ws, [
-            str(dt.datetime.now(CR_TZ)), label, "BUY",
-            close, sl, tp, rsi_last, MAX_RISK_USD, lot, "", "confirm"
-        ])
-        return True
+        return
 
-    if sell_signal:
-        sl = close + (abs(close - ema20) * 2)
-        tp = close - (abs(close - ema20) * 4)
-        lot = round(MAX_RISK_USD / abs(close - sl), 2)
+    # ---- SELL ----
+    if cross_dn_prev and sell_confirm:
+        entry = float(close_last)
+        slv = entry + SL_PIPS * pip_value(yf_symbol)
+        tpv = entry - TP_PIPS * pip_value(yf_symbol)
+        lot = calculate_lot_for_risk(entry, slv, MAX_RISK_USD, yf_symbol)
 
-        msg = f"""
-SELL Confirmado en {label}
-Entrada: {close}
-SL: {sl}
-TP: {tp}
+        msg = f"""📉 Señal CONFIRMADA SELL {label}
+
+Entrada: {entry}
+SL: {slv}
+TP: {tpv}
 RSI: {rsi_last:.1f}
 Riesgo: ${MAX_RISK_USD}
 Lote sugerido: {lot}
 """
+
         send_email(f"SELL Confirmado {label}", msg)
-        log_to_sheet(ws, [
-            str(dt.datetime.now(CR_TZ)), label, "SELL",
-            close, sl, tp, rsi_last, MAX_RISK_USD, lot, "", "confirm"
-        ])
-        return True
-
-    return False  # No hubo señal para este par
+        return
 
 
-# ---------- LOOP PRINCIPAL ----------
+# ---------- LOOP PRINCIPAL CRON ----------
 if __name__ == "__main__":
     print("=== Bot ejecutándose (modo CRON) ===")
-    ws = init_sheets()
-
-    signals_sent = False
 
     for label, symbol in pairs.items():
-        if analyze_pair(label, symbol, ws):
-            signals_sent = True
+        analyze_pair(label, symbol)
 
-    if not signals_sent:
-        print("No hubo señales esta hora.")
+    print("No hubo señales esta hora.")
