@@ -1,7 +1,7 @@
 name: Test Email
 
 on:
-  workflow_dispatch:   # Te permite correrlo manualmente
+  workflow_dispatch:
 
 jobs:
   send-test-email:
@@ -33,7 +33,7 @@ sender = os.getenv("EMAIL_USER")
 password = os.getenv("EMAIL_PASSWORD")
 receiver = os.getenv("EMAIL_TO")
 
-yag = yagmail.SMTP(sender, password)
+yag = yagmail.SMTP(user=sender, password=password)
 yag.send(
     to=receiver,
     subject="Test desde GitHub Actions",
