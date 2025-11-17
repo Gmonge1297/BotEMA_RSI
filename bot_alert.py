@@ -3,19 +3,29 @@ import numpy as np
 import datetime as dt
 import pytz
 import time
-from fmp_python.fmp import FMP
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from alpha_vantage.foreignexchange import ForeignExchange
 import os
 
-# ---------- Variables de entorno ----------
-EMAIL_USER = os.getenv("EMAIL_USER")
-EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
-EMAIL_TO = os.getenv("EMAIL_TO")
 
-FMP_API_KEY = os.getenv("FMP_API_KEY")
+# ===============================
+# CONFIGURACIÓN
+# ===============================
 
-# ---------- Parámetros de Estrategia ----------
 CR_TZ = pytz.timezone("America/Costa_Rica")
 
+# AlphaVantage API Key (desde Secrets de GitHub)
+ALPHA_KEY = os.environ["ALPHAVANTAGE_KEY"]
+
+# Configuración de email
+EMAIL_USER = "gmonge.botfx@gmail.com"      # <-- CAMBIAR
+EMAIL_PASS = "TU_APP_PASSWORD"          # <-- CAMBIAR (16 dígitos)
+EMAIL_TO = "edgardoms2010@gmail.com"        # <-- Donde quieres recibir alertas
+
+
+# Estrategia
 EMA_FAST = 20
 EMA_SLOW = 50
 RSI_PERIOD = 14
@@ -26,33 +36,40 @@ RSI_SELL = 45
 SL_PIPS = 300
 TP_PIPS = 600
 MAX_RISK_USD = 1.5
-TIMEFRAME_MINUTES = 60
 
+
+# Pares
 pairs = {
-    "EURUSD": "EURUSD",
-    "GBPUSD": "GBPUSD",
-    "USDJPY": "USDJPY",
-    "XAUUSD": "XAUUSD"
+    "EURUSD": "EUR/USD",
+    "GBPUSD": "GBP/USD",
+    "USDJPY": "USD/JPY",
+    "XAUUSD": "XAU/USD"
 }
 
-# ---------- Indicadores ----------
+
+# ===============================
+# FUNCIONES DE INDICADORES
+# ===============================
+
 def ema(series, span):
     return series.ewm(span=span, adjust=False).mean()
+
 
 def rsi(series, period=14):
     delta = series.diff()
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
+
     avg_gain = pd.Series(gain).rolling(window=period).mean()
     avg_loss = pd.Series(loss).rolling(window=period).mean()
-    rs = avg_gain / avg_loss
-    rsi_series = 100 - (100 / (1 + rs))
-    return rsi_series
 
-# ---------- Envío de correo ----------
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
+
+# ===============================
+# ENVÍO DE EMAIL
+# ===============================
 
 def send_email(subject, body):
     try:
@@ -64,58 +81,74 @@ def send_email(subject, body):
 
         server = smtplib.SMTP("smtp.gmail.com", 587)
         server.starttls()
-        server.login(EMAIL_USER, EMAIL_PASSWORD)
+        server.login(EMAIL_USER, EMAIL_PASS)
         server.send_message(msg)
         server.quit()
+
         print("Correo enviado:", subject)
     except Exception as e:
         print("Error enviando correo:", e)
 
-# ---------- Pips ----------
-def pip_value(symbol):
-    return 0.01 if "XAU" in symbol else 0.0001
 
-def calculate_lot_for_risk(entry, sl, max_risk, symbol):
+# ===============================
+# DESCARGAR DATOS ALPHAVANTAGE
+# ===============================
+
+def fetch_alpha(symbol):
+    try:
+        fx = ForeignExchange(key=ALPHA_KEY, output_format="pandas")
+        data, _ = fx.get_currency_exchange_intraday(
+            from_symbol=symbol.split("/")[0],
+            to_symbol=symbol.split("/")[1],
+            interval="60min",
+            outputsize="full"
+        )
+        df = data.sort_index()
+        df = df.rename(columns={
+            "1. open": "open",
+            "2. high": "high",
+            "3. low": "low",
+            "4. close": "close"
+        })
+        return df
+    except Exception as e:
+        print("Error AlphaVantage:", e)
+        return pd.DataFrame()
+
+
+# ===============================
+# VALORES DE PIP Y RISK
+# ===============================
+
+def pip_value(symbol):
+    if "JPY" in symbol:
+        return 0.01
+    if "XAU" in symbol:
+        return 0.1
+    return 0.0001
+
+
+def calculate_lot(entry, sl, max_risk, symbol):
     pip = pip_value(symbol)
     sl_pips = abs((entry - sl) / pip)
     if sl_pips == 0:
         return 0.01
-    value_per_pip_per_0_01 = 0.10
-    lot = max_risk / (sl_pips * value_per_pip_per_0_01)
+    value_per_pip_0_01 = 0.10
+    lot = max_risk / (sl_pips * value_per_pip_0_01)
     return max(round(lot, 2), 0.01)
 
-# ---------- Datos desde FMP ----------
-def fetch_fmp(symbol):
-    try:
-        fmp = FMP(FMP_API_KEY)
-        tf = "1hour"
 
-        data = fmp.forex_candle(pair=symbol, interval=tf, limit=200)
-        if not data:
-            return pd.DataFrame()
+# ===============================
+# ANÁLISIS DE CADA PAR
+# ===============================
 
-        df = pd.DataFrame(data)
-        df = df.rename(columns={
-            "o": "open",
-            "h": "high",
-            "l": "low",
-            "c": "close"
-        })
-
-        df = df[["open", "high", "low", "close"]].astype(float)
-        return df
-
-    except Exception as e:
-        print("Error FMP:", e)
-        return pd.DataFrame()
-
-# ---------- Estrategia con Vela de Confirmación ----------
 def analyze_pair(label, symbol):
     print(f"Descargando datos de {label}...")
 
-    df = fetch_fmp(symbol)
+    df = fetch_alpha(symbol)
+
     if df.empty or len(df) < 60:
-        print("Sin datos suficientes.")
+        print("Sin datos suficientes.\n")
         return
 
     close = df["close"]
@@ -125,18 +158,17 @@ def analyze_pair(label, symbol):
     ema_slow = ema(close, EMA_SLOW)
     rsi_series = rsi(close, RSI_PERIOD)
 
-    f2 = ema_fast.iat[-3]
-    s2 = ema_slow.iat[-3]
-    f1 = ema_fast.iat[-2]
-    s1 = ema_slow.iat[-2]
-    fl = ema_fast.iat[-1]
-    sl = ema_slow.iat[-1]
+    # Velas prev (-2) y last (-1)
+    f2 = ema_fast.iloc[-3]
+    s2 = ema_slow.iloc[-3]
+    f1 = ema_fast.iloc[-2]
+    s1 = ema_slow.iloc[-2]
+    fl = ema_fast.iloc[-1]
+    sl = ema_slow.iloc[-1]
 
-    close1 = close.iat[-2]
-    close_last = close.iat[-1]
-    open_last = openv.iat[-1]
-
-    rsi_last = rsi_series.iat[-1]
+    close_last = close.iloc[-1]
+    open_last = openv.iloc[-1]
+    rsi_last = rsi_series.iloc[-1]
 
     cross_up_prev = (f2 <= s2) and (f1 > s1)
     cross_dn_prev = (f2 >= s2) and (f1 < s1)
@@ -153,50 +185,56 @@ def analyze_pair(label, symbol):
         rsi_last < RSI_SELL
     )
 
-    # ---- BUY ----
+    # BUY
     if cross_up_prev and buy_confirm:
         entry = float(close_last)
-        slv = entry - SL_PIPS * pip_value(symbol)
-        tpv = entry + TP_PIPS * pip_value(symbol)
-        lot = calculate_lot_for_risk(entry, slv, MAX_RISK_USD, symbol)
+        slv = entry - SL_PIPS * pip_value(label)
+        tpv = entry + TP_PIPS * pip_value(label)
+        lot = calculate_lot(entry, slv, MAX_RISK_USD, label)
 
-        msg = f"""📈 Señal CONFIRMADA BUY {label}
+        msg = f"""
+📈 Señal BUY CONFIRMADA {label}
 
 Entrada: {entry}
-SL: {slv}
-TP: {tpv}
+Stop Loss: {slv}
+Take Profit: {tpv}
 RSI: {rsi_last:.1f}
-Riesgo: ${MAX_RISK_USD}
 Lote sugerido: {lot}
+Riesgo: ${MAX_RISK_USD}
 """
         send_email(f"BUY Confirmado {label}", msg)
         return
 
-    # ---- SELL ----
+    # SELL
     if cross_dn_prev and sell_confirm:
         entry = float(close_last)
-        slv = entry + SL_PIPS * pip_value(symbol)
-        tpv = entry - TP_PIPS * pip_value(symbol)
-        lot = calculate_lot_for_risk(entry, slv, MAX_RISK_USD, symbol)
+        slv = entry + SL_PIPS * pip_value(label)
+        tpv = entry - TP_PIPS * pip_value(label)
+        lot = calculate_lot(entry, slv, MAX_RISK_USD, label)
 
-        msg = f"""📉 Señal CONFIRMADA SELL {label}
+        msg = f"""
+📉 Señal SELL CONFIRMADA {label}
 
 Entrada: {entry}
-SL: {slv}
-TP: {tpv}
+Stop Loss: {slv}
+Take Profit: {tpv}
 RSI: {rsi_last:.1f}
-Riesgo: ${MAX_RISK_USD}
 Lote sugerido: {lot}
+Riesgo: ${MAX_RISK_USD}
 """
         send_email(f"SELL Confirmado {label}", msg)
         return
 
-# ---------- Loop principal ----------
+
+# ===============================
+# LOOP PRINCIPAL
+# ===============================
+
 if __name__ == "__main__":
-    print("=== Bot ejecutándose (modo CRON) ===")
+    print("=== Bot ejecutándose (AlphaVantage) ===\n")
 
     for label, symbol in pairs.items():
         analyze_pair(label, symbol)
-        time.sleep(2)
+        time.sleep(1)
 
-    print("No hubo señales esta hora.")
+    print("No hubo señales esta hora.\n")
