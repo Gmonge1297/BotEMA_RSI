@@ -182,11 +182,12 @@ Lote sugerido: {lot}
         send_email(f"SELL Confirmado {label}", msg)
         return
 
-# ---------- LOOP PRINCIPAL ----------
+# ---------- Loop principal (CRON mode) ----------
 if __name__ == "__main__":
     print("=== Bot ejecutándose (modo CRON) ===")
 
     for label, symbol in pairs.items():
         analyze_pair(label, symbol)
+        time.sleep(2)  # Pausa de 2 segundos entre pares
 
     print("No hubo señales esta hora.")
