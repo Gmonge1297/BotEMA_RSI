@@ -17,13 +17,12 @@ import os
 CR_TZ = pytz.timezone("America/Costa_Rica")
 
 # AlphaVantage API Key (desde Secrets de GitHub)
-ALPHA_KEY = os.environ["ALPHAVANTAGE_KEY"]
+ALPHA_KEY = os.getenv("ALPHAVANTAGE_KEY")
 
 # Configuración de email
-EMAIL_USER = "gmonge.botfx@gmail.com"      # <-- CAMBIAR
-EMAIL_PASS = "TU_APP_PASSWORD"          # <-- CAMBIAR (16 dígitos)
-EMAIL_TO = "edgardoms2010@gmail.com"        # <-- Donde quieres recibir alertas
-
+EMAIL_USER = "gmonge.botfx@gmail.com"
+EMAIL_PASS = os.getenv("EMAIL_PASS")
+EMAIL_TO = "edgardoms2010@gmail.com"
 
 # Estrategia
 EMA_FAST = 20
@@ -36,7 +35,6 @@ RSI_SELL = 45
 SL_PIPS = 300
 TP_PIPS = 600
 MAX_RISK_USD = 1.5
-
 
 # Pares
 pairs = {
