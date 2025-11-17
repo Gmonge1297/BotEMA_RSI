@@ -108,8 +108,9 @@ def analyze_pair(label, yf_symbol):
         print("Sin datos suficientes.")
         return
 
-    close = df["close"]
-    openv = df["open"]
+    # CORRECCIÓN AQUÍ
+    close = df["close"].squeeze()
+    openv = df["open"].squeeze()
 
     ema_fast = ema(close, EMA_FAST)
     ema_slow = ema(close, EMA_SLOW)
@@ -123,17 +124,14 @@ def analyze_pair(label, yf_symbol):
     fl = ema_fast.iat[-1]
     sl = ema_slow.iat[-1]
 
-    close1 = close.iat[-2]
     close_last = close.iat[-1]
     open_last = openv.iat[-1]
 
     rsi_last = rsi_series.iat[-1]
 
-    # Cruces detectados en vela anterior
     cross_up_prev = (f2 <= s2) and (f1 > s1)
     cross_dn_prev = (f2 >= s2) and (f1 < s1)
 
-    # Confirmación estricta en vela actual
     buy_confirm = (
         close_last > open_last and
         close_last > fl and close_last > sl and
@@ -146,7 +144,7 @@ def analyze_pair(label, yf_symbol):
         rsi_last < RSI_SELL
     )
 
-    # ---- BUY ----
+    # BUY
     if cross_up_prev and buy_confirm:
         entry = float(close_last)
         slv = entry - SL_PIPS * pip_value(yf_symbol)
@@ -162,11 +160,10 @@ RSI: {rsi_last:.1f}
 Riesgo: ${MAX_RISK_USD}
 Lote sugerido: {lot}
 """
-
         send_email(f"BUY Confirmado {label}", msg)
         return
 
-    # ---- SELL ----
+    # SELL
     if cross_dn_prev and sell_confirm:
         entry = float(close_last)
         slv = entry + SL_PIPS * pip_value(yf_symbol)
@@ -182,12 +179,10 @@ RSI: {rsi_last:.1f}
 Riesgo: ${MAX_RISK_USD}
 Lote sugerido: {lot}
 """
-
         send_email(f"SELL Confirmado {label}", msg)
         return
 
-
-# ---------- LOOP PRINCIPAL CRON ----------
+# ---------- LOOP PRINCIPAL ----------
 if __name__ == "__main__":
     print("=== Bot ejecutándose (modo CRON) ===")
 
