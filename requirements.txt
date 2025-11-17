@@ -1,4 +1,4 @@
 pandas
 numpy
 pytz
-fmp-python
+alpha_vantage
