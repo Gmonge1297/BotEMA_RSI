@@ -17,12 +17,13 @@ import os
 CR_TZ = pytz.timezone("America/Costa_Rica")
 
 # AlphaVantage API Key (desde Secrets de GitHub)
-ALPHA_KEY = os.getenv("ALPHAVANTAGE_KEY")
+ALPHA_KEY = os.getenv("ALPHAVANTAGE_API_KEY")  # <-- CORREGIDO
 
 # Configuración de email
 EMAIL_USER = "gmonge.botfx@gmail.com"
-EMAIL_PASS = os.getenv("EMAIL_PASS")
+EMAIL_PASS = os.getenv("EMAIL_PASS")           # desde Secrets
 EMAIL_TO = "edgardoms2010@gmail.com"
+
 
 # Estrategia
 EMA_FAST = 20
@@ -35,6 +36,7 @@ RSI_SELL = 45
 SL_PIPS = 300
 TP_PIPS = 600
 MAX_RISK_USD = 1.5
+
 
 # Pares
 pairs = {
@@ -89,7 +91,7 @@ def send_email(subject, body):
 
 
 # ===============================
-# DESCARGAR DATOS ALPHAVANTAGE
+# DESCARGAR DATOS DE ALPHAVANTAGE
 # ===============================
 
 def fetch_alpha(symbol):
@@ -101,6 +103,7 @@ def fetch_alpha(symbol):
             interval="60min",
             outputsize="full"
         )
+
         df = data.sort_index()
         df = df.rename(columns={
             "1. open": "open",
@@ -109,13 +112,14 @@ def fetch_alpha(symbol):
             "4. close": "close"
         })
         return df
+
     except Exception as e:
         print("Error AlphaVantage:", e)
         return pd.DataFrame()
 
 
 # ===============================
-# VALORES DE PIP Y RISK
+# PIP VALUE + RISK
 # ===============================
 
 def pip_value(symbol):
