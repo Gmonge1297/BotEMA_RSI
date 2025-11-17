@@ -1,0 +1,44 @@
+name: Test Email
+
+on:
+  workflow_dispatch:   # Te permite correrlo manualmente
+
+jobs:
+  send-test-email:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repo
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.10"
+
+    - name: Install dependencies
+      run: pip install yagmail
+
+    - name: Send Test Email
+      env:
+        EMAIL_USER: ${{ secrets.EMAIL_USER }}
+        EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+        EMAIL_TO: ${{ secrets.EMAIL_TO }}
+      run: |
+        python - << 'EOF'
+import yagmail
+import os
+
+sender = os.getenv("EMAIL_USER")
+password = os.getenv("EMAIL_PASSWORD")
+receiver = os.getenv("EMAIL_TO")
+
+yag = yagmail.SMTP(sender, password)
+yag.send(
+    to=receiver,
+    subject="Test desde GitHub Actions",
+    contents="¡Este es un correo de prueba enviado automáticamente por GitHub Actions!"
+)
+
+print("Correo enviado correctamente")
+EOF
