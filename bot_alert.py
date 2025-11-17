@@ -3,6 +3,7 @@ import numpy as np
 import yfinance as yf
 import datetime as dt
 import pytz
+import time
 import os
 import smtplib
 from email.mime.text import MIMEText
