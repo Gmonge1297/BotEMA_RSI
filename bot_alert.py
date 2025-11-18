@@ -1,242 +1,162 @@
+import yfinance as yf
 import pandas as pd
 import numpy as np
-import datetime as dt
-import pytz
 import time
+import os
 import smtplib
 from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from alpha_vantage.foreignexchange import ForeignExchange
-import os
 
+# =========================================================
+# CONFIGURACIÓN EMAIL
+# =========================================================
+EMAIL_USER = os.getenv("EMAIL_USER")
+EMAIL_PASS = os.getenv("EMAIL_PASS")
+EMAIL_TO = os.getenv("EMAIL_TO")
 
-# ===============================
-# CONFIGURACIÓN
-# ===============================
-
-CR_TZ = pytz.timezone("America/Costa_Rica")
-
-# AlphaVantage API Key (desde Secrets de GitHub)
-ALPHA_KEY = os.getenv("ALPHAVANTAGE_API_KEY")  # <-- CORREGIDO
-
-# Configuración de email
-EMAIL_USER = "gmonge.botfx@gmail.com"
-EMAIL_PASS = os.getenv("EMAIL_PASS")           # desde Secrets
-EMAIL_TO = "edgardoms2010@gmail.com"
-
-
-# Estrategia
-EMA_FAST = 20
-EMA_SLOW = 50
-RSI_PERIOD = 14
-
-RSI_BUY = 55
-RSI_SELL = 45
-
-SL_PIPS = 300
-TP_PIPS = 600
-MAX_RISK_USD = 1.5
-
-
-# Pares
-pairs = {
-    "EURUSD": "EUR/USD",
-    "GBPUSD": "GBP/USD",
-    "USDJPY": "USD/JPY",
-    "XAUUSD": "XAU/USD"
-}
-
-
-# ===============================
-# FUNCIONES DE INDICADORES
-# ===============================
-
-def ema(series, span):
-    return series.ewm(span=span, adjust=False).mean()
-
-
-def rsi(series, period=14):
-    delta = series.diff()
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-
-    avg_gain = pd.Series(gain).rolling(window=period).mean()
-    avg_loss = pd.Series(loss).rolling(window=period).mean()
-
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
-
-
-# ===============================
-# ENVÍO DE EMAIL
-# ===============================
-
-def send_email(subject, body):
+# =========================================================
+# FUNCIÓN PARA ENVIAR CORREOS
+# =========================================================
+def enviar_correo(asunto, mensaje):
     try:
-        msg = MIMEMultipart()
+        msg = MIMEText(mensaje)
+        msg["Subject"] = asunto
         msg["From"] = EMAIL_USER
         msg["To"] = EMAIL_TO
-        msg["Subject"] = subject
-        msg.attach(MIMEText(body, "plain"))
 
-        server = smtplib.SMTP("smtp.gmail.com", 587)
-        server.starttls()
-        server.login(EMAIL_USER, EMAIL_PASS)
-        server.send_message(msg)
-        server.quit()
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(EMAIL_USER, EMAIL_PASS)
+            server.sendmail(EMAIL_USER, EMAIL_TO, msg.as_string())
 
-        print("Correo enviado:", subject)
+        print("Correo enviado ✔")
     except Exception as e:
         print("Error enviando correo:", e)
 
 
-# ===============================
-# DESCARGAR DATOS DE ALPHAVANTAGE
-# ===============================
-
-def fetch_alpha(symbol):
+# =========================================================
+# DESCARGA DE DATOS (ANTI BLOQUEO)
+# =========================================================
+def get_data(par):
     try:
-        fx = ForeignExchange(key=ALPHA_KEY, output_format="pandas")
-        data, _ = fx.get_currency_exchange_intraday(
-            from_symbol=symbol.split("/")[0],
-            to_symbol=symbol.split("/")[1],
-            interval="60min",
-            outputsize="full"
-        )
+        print(f"\nDescargando datos de {par}...")
+        df = yf.download(par, interval="1h", period="7d")
 
-        df = data.sort_index()
-        df = df.rename(columns={
-            "1. open": "open",
-            "2. high": "high",
-            "3. low": "low",
-            "4. close": "close"
-        })
+        # Si no devuelve datos
+        if df is None or df.empty:
+            print("⚠ Sin datos suficientes.")
+            return None
+
+        df = df.dropna()
         return df
 
     except Exception as e:
-        print("Error AlphaVantage:", e)
-        return pd.DataFrame()
+        print("⚠ Error descargando datos:", e)
+        return None
 
 
-# ===============================
-# PIP VALUE + RISK
-# ===============================
+# =========================================================
+# CÁLCULO DE INDICADORES
+# =========================================================
+def aplicar_indicadores(df):
+    df["EMA20"] = df["Close"].ewm(span=20).mean()
+    df["EMA50"] = df["Close"].ewm(span=50).mean()
 
-def pip_value(symbol):
-    if "JPY" in symbol:
-        return 0.01
-    if "XAU" in symbol:
-        return 0.1
-    return 0.0001
+    # RSI manual
+    delta = df["Close"].diff()
+    up = delta.clip(lower=0)
+    down = -delta.clip(upper=0)
+    rs = up.rolling(14).mean() / down.rolling(14).mean()
+    df["RSI"] = 100 - (100 / (1 + rs))
 
-
-def calculate_lot(entry, sl, max_risk, symbol):
-    pip = pip_value(symbol)
-    sl_pips = abs((entry - sl) / pip)
-    if sl_pips == 0:
-        return 0.01
-    value_per_pip_0_01 = 0.10
-    lot = max_risk / (sl_pips * value_per_pip_0_01)
-    return max(round(lot, 2), 0.01)
+    df.dropna(inplace=True)
+    return df
 
 
-# ===============================
-# ANÁLISIS DE CADA PAR
-# ===============================
+# =========================================================
+# ESTRATEGIA
+# =========================================================
+def generar_senal(df, par):
 
-def analyze_pair(label, symbol):
-    print(f"Descargando datos de {label}...")
+    c = df.iloc[-1]  # última vela
+    prev = df.iloc[-2]  # vela anterior
 
-    df = fetch_alpha(symbol)
-
-    if df.empty or len(df) < 60:
-        print("Sin datos suficientes.\n")
-        return
-
-    close = df["close"]
-    openv = df["open"]
-
-    ema_fast = ema(close, EMA_FAST)
-    ema_slow = ema(close, EMA_SLOW)
-    rsi_series = rsi(close, RSI_PERIOD)
-
-    # Velas prev (-2) y last (-1)
-    f2 = ema_fast.iloc[-3]
-    s2 = ema_slow.iloc[-3]
-    f1 = ema_fast.iloc[-2]
-    s1 = ema_slow.iloc[-2]
-    fl = ema_fast.iloc[-1]
-    sl = ema_slow.iloc[-1]
-
-    close_last = close.iloc[-1]
-    open_last = openv.iloc[-1]
-    rsi_last = rsi_series.iloc[-1]
-
-    cross_up_prev = (f2 <= s2) and (f1 > s1)
-    cross_dn_prev = (f2 >= s2) and (f1 < s1)
-
-    buy_confirm = (
-        close_last > open_last and
-        close_last > fl and close_last > sl and
-        rsi_last > RSI_BUY
+    # Condiciones BUY
+    buy = (
+        c["EMA20"] > c["EMA50"] and
+        prev["EMA20"] <= prev["EMA50"] and
+        c["RSI"] > 50 and
+        c["Close"] > c["Open"]  # vela verde
     )
 
-    sell_confirm = (
-        close_last < open_last and
-        close_last < fl and close_last < sl and
-        rsi_last < RSI_SELL
+    # Condiciones SELL
+    sell = (
+        c["EMA20"] < c["EMA50"] and
+        prev["EMA20"] >= prev["EMA50"] and
+        c["RSI"] < 50 and
+        c["Close"] < c["Open"]  # vela roja
     )
 
-    # BUY
-    if cross_up_prev and buy_confirm:
-        entry = float(close_last)
-        slv = entry - SL_PIPS * pip_value(label)
-        tpv = entry + TP_PIPS * pip_value(label)
-        lot = calculate_lot(entry, slv, MAX_RISK_USD, label)
+    if buy:
+        entry = float(c["Close"])
+        sl = round(entry - (entry * 0.003), 5)  # 30 pips approx
+        tp = round(entry + (entry * 0.006), 5)  # 60 pips approx
 
-        msg = f"""
-📈 Señal BUY CONFIRMADA {label}
+        return f"""📈 **SEÑAL DE COMPRA ({par})**
 
 Entrada: {entry}
-Stop Loss: {slv}
-Take Profit: {tpv}
-RSI: {rsi_last:.1f}
-Lote sugerido: {lot}
-Riesgo: ${MAX_RISK_USD}
+Stop Loss: {sl}
+Take Profit: {tp}
+
+Condiciones:
+- EMA20 > EMA50
+- RSI > 50
+- Vela verde de confirmación
 """
-        send_email(f"BUY Confirmado {label}", msg)
-        return
 
-    # SELL
-    if cross_dn_prev and sell_confirm:
-        entry = float(close_last)
-        slv = entry + SL_PIPS * pip_value(label)
-        tpv = entry - TP_PIPS * pip_value(label)
-        lot = calculate_lot(entry, slv, MAX_RISK_USD, label)
+    if sell:
+        entry = float(c["Close"])
+        sl = round(entry + (entry * 0.003), 5)
+        tp = round(entry - (entry * 0.006), 5)
 
-        msg = f"""
-📉 Señal SELL CONFIRMADA {label}
+        return f"""📉 **SEÑAL DE VENTA ({par})**
 
 Entrada: {entry}
-Stop Loss: {slv}
-Take Profit: {tpv}
-RSI: {rsi_last:.1f}
-Lote sugerido: {lot}
-Riesgo: ${MAX_RISK_USD}
+Stop Loss: {sl}
+Take Profit: {tp}
+
+Condiciones:
+- EMA20 < EMA50
+- RSI < 50
+- Vela roja de confirmación
 """
-        send_email(f"SELL Confirmado {label}", msg)
-        return
+
+    return None
 
 
-# ===============================
-# LOOP PRINCIPAL
-# ===============================
+# =========================================================
+# PARES A ANALIZAR
+# =========================================================
+pares = ["EURUSD=X", "GBPUSD=X", "USDJPY=X", "XAUUSD=X"]
 
-if __name__ == "__main__":
-    print("=== Bot ejecutándose (AlphaVantage) ===\n")
 
-    for label, symbol in pairs.items():
-        analyze_pair(label, symbol)
-        time.sleep(1)
+# =========================================================
+# MAIN LOOP (GitHub Actions)
+# =========================================================
+print("\n=== BOT EJECUTÁNDOSE (YFINANCE) ===\n")
 
-    print("No hubo señales esta hora.\n")
+for par in pares:
+    df = get_data(par)
+    time.sleep(2)  # pequeña pausa anti bloqueo
+
+    if df is None:
+        continue
+
+    df = aplicar_indicadores(df)
+    senal = generar_senal(df, par)
+
+    if senal:
+        enviar_correo(f"Señal detectada: {par}", senal)
+        print(senal)
+    else:
+        print(f"Sin señal en {par}")
+
+print("\n--- Fin de ejecución ---")
