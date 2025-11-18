@@ -6,10 +6,9 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
-
-# ==========================
+# ==============================================================
 # CONFIGURACIÓN
-# ==========================
+# ==============================================================
 EMAIL_USER = os.getenv("EMAIL_USER")
 EMAIL_PASS = os.getenv("EMAIL_PASS")
 EMAIL_TO = os.getenv("EMAIL_TO")
@@ -20,10 +19,14 @@ RSI_PERIOD = 14
 RSI_BUY = 50
 RSI_SELL = 50
 
+ATR_PERIOD = 14
+ATR_TP_MULT = 2.0   # ATR x2
+ATR_SL_MULT = 1.0   # ATR x1
 
-# ==========================
+
+# ==============================================================
 # RSI
-# ==========================
+# ==============================================================
 def rsi(series, period=14):
     delta = series.diff()
     gain = np.where(delta > 0, delta, 0)
@@ -36,79 +39,121 @@ def rsi(series, period=14):
     return 100 - (100 / (1 + RS))
 
 
-# ==========================
+# ==============================================================
+# ATR PARA TP/SL
+# ==============================================================
+def calcular_atr(df):
+    high_low = df["High"] - df["Low"]
+    high_close = abs(df["High"] - df["Close"].shift())
+    low_close = abs(df["Low"] - df["Close"].shift())
+
+    ranges = pd.concat([high_low, high_close, low_close], axis=1)
+    true_range = ranges.max(axis=1)
+    atr = true_range.rolling(ATR_PERIOD).mean()
+    return atr
+
+
+# ==============================================================
 # FUNCIÓN DE SEÑALES
-# ==========================
+# ==============================================================
 def generar_senal(df, par):
+
     # --- FIX MULTIINDEX ---
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(-1)
 
-    # --- VALIDAR COLUMNAS ---
-    required = ["Open", "High", "Low", "Close"]
-    for col in required:
-        if col not in df.columns:
-            print(f"Falta columna {col} en {par}")
-            return None
-
-    # --- EMAs ---
     df["EMA20"] = df["Close"].ewm(span=20, adjust=False).mean()
     df["EMA50"] = df["Close"].ewm(span=50, adjust=False).mean()
-
-    # --- RSI ---
     df["RSI"] = rsi(df["Close"], RSI_PERIOD)
+    df["ATR"] = calcular_atr(df)
 
-    # --- TOMAR ÚLTIMAS VELAS COMO SERIES (FUNDAMENTAL) ---
-    c = df.iloc[-1].astype(float)  # vela actual
-    p = df.iloc[-2].astype(float)  # vela previa
+    c = df.iloc[-1].astype(float)
+    p = df.iloc[-2].astype(float)
 
-    # --- CRUCES ---
-    cruce_up = (p["EMA20"] <= p["EMA50"]) and (c["EMA20"] > c["EMA50"])
-    cruce_down = (p["EMA20"] >= p["EMA50"]) and (c["EMA20"] < c["EMA50"])
+    print(f"--- Análisis {par} ---")
+    print(f"EMA20 actual: {c['EMA20']:.5f}")
+    print(f"EMA50 actual: {c['EMA50']:.5f}")
+    print(f"RSI actual: {c['RSI']:.2f}")
+    print(f"ATR actual: {c['ATR']:.5f}")
 
-    # --- VELAS ---
+    # Cruces
+    cruce_up = p["EMA20"] <= p["EMA50"] and c["EMA20"] > c["EMA50"]
+    cruce_down = p["EMA20"] >= p["EMA50"] and c["EMA20"] < c["EMA50"]
+
+    # Velas
     vela_verde = c["Close"] > c["Open"]
     vela_roja = c["Close"] < c["Open"]
 
-    # --- BUY ---
+    # BUY
     if cruce_up and vela_verde and c["RSI"] > RSI_BUY:
+        entry = c["Close"]
+        atr_val = c["ATR"]
+
+        tp = entry + atr_val * ATR_TP_MULT
+        sl = entry - atr_val * ATR_SL_MULT
+
+        print("SEÑAL BUY DETECTADA ✔")
         return {
             "tipo": "BUY",
-            "entrada": float(c["Close"]),
-            "par": par
+            "par": par,
+            "entrada": float(entry),
+            "tp": float(tp),
+            "sl": float(sl)
         }
 
-    # --- SELL ---
+    # SELL
     if cruce_down and vela_roja and c["RSI"] < RSI_SELL:
+        entry = c["Close"]
+        atr_val = c["ATR"]
+
+        tp = entry - atr_val * ATR_TP_MULT
+        sl = entry + atr_val * ATR_SL_MULT
+
+        print("SEÑAL SELL DETECTADA ✔")
         return {
             "tipo": "SELL",
-            "entrada": float(c["Close"]),
-            "par": par
+            "par": par,
+            "entrada": float(entry),
+            "tp": float(tp),
+            "sl": float(sl)
         }
 
+    print("Sin señal.")
     return None
 
 
-# ==========================
-# EMAIL
-# ==========================
+# ==============================================================
+# CORREO BONITO (HTML)
+# ==============================================================
 def enviar_alerta(senal):
-    subject = f"Alerta {senal['tipo']} - {senal['par']}"
-    body = f"""
-Se generó una señal:
 
-PAR: {senal['par']}
-TIPO: {senal['tipo']}
-ENTRADA: {senal['entrada']}
+    tipo = senal["tipo"]
+    color = "green" if tipo == "BUY" else "red"
 
-Bot EMA20/EMA50 + RSI + Confirmación de Vela
-"""
+    html = f"""
+    <html>
+    <body>
+        <h2 style="color:{color};">🔔 Señal {tipo} Detectada</h2>
 
-    msg = MIMEMultipart()
+        <table border="1" cellpadding="6" style="border-collapse: collapse; font-size: 14px;">
+            <tr><td><b>Par:</b></td><td>{senal['par']}</td></tr>
+            <tr><td><b>Entrada:</b></td><td>{senal['entrada']}</td></tr>
+            <tr><td><b>Take Profit (TP):</b></td><td>{senal['tp']}</td></tr>
+            <tr><td><b>Stop Loss (SL):</b></td><td>{senal['sl']}</td></tr>
+        </table>
+
+        <br>
+        <p>Bot EMA20/EMA50 + RSI + Vela + ATR (TP/SL)</p>
+    </body>
+    </html>
+    """
+
+    msg = MIMEMultipart("alternative")
     msg["From"] = EMAIL_USER
     msg["To"] = EMAIL_TO
-    msg["Subject"] = subject
-    msg.attach(MIMEText(body, "plain"))
+    msg["Subject"] = f"🚀 Señal {tipo} - {senal['par']}"
+
+    msg.attach(MIMEText(html, "html"))
 
     try:
         server = smtplib.SMTP("smtp.gmail.com", 587)
@@ -116,20 +161,19 @@ Bot EMA20/EMA50 + RSI + Confirmación de Vela
         server.login(EMAIL_USER, EMAIL_PASS)
         server.sendmail(EMAIL_USER, EMAIL_TO, msg.as_string())
         server.quit()
-        print(f"Correo enviado: {subject}")
+        print("Correo enviado ✔")
     except Exception as e:
         print(f"Error enviando correo: {e}")
 
 
-# ==========================
+# ==============================================================
 # MAIN LOOP
-# ==========================
+# ==============================================================
 if __name__ == "__main__":
-    print("=== BOT EJECUTÁNDOSE (YFINANCE) ===\n")
+    print("=== BOT EJECUTANDO (YFINANCE + TP/SL + HTML) ===\n")
 
     for par in PARES:
-        print(f"\nDescargando datos de {par}...\n")
-
+        print(f"\nDescargando datos de {par}...")
         df = yf.download(par, interval="1h", period="7d")
 
         if df is None or len(df) < 50:
@@ -140,5 +184,3 @@ if __name__ == "__main__":
 
         if senal:
             enviar_alerta(senal)
-        else:
-            print("No hay señal en esta hora.")
