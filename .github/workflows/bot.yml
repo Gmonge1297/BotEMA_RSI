@@ -2,8 +2,7 @@ name: Run Trading Bot
 
 on:
   schedule:
-    # Corre cada hora en el minuto 0
-    - cron: "0 * * * *"
+    - cron: "0 * * * *"   # Corre cada hora en el minuto 0
   workflow_dispatch:
 
 jobs:
@@ -28,7 +27,7 @@ jobs:
         env:
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
-          ALPHA_VANTAGE_KEY: ${{ secrets.ALPHA_VANTAGE_KEY }}
+          ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}  # <-- CORREGIDO
         run: |
           echo "=== Ejecutando Bot (AlphaVantage) ==="
           python bot_alert.py
