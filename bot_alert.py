@@ -1,162 +1,173 @@
-import yfinance as yf
 import pandas as pd
 import numpy as np
+import datetime as dt
+import pytz
 import time
-import os
 import smtplib
 from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+import yfinance as yf
+import os
 
-# =========================================================
-# CONFIGURACIÓN EMAIL
-# =========================================================
+
+# ===============================
+# CONFIGURACIÓN GENERAL
+# ===============================
+
+CR_TZ = pytz.timezone("America/Costa_Rica")
+
+# Credenciales desde Secrets de GitHub
 EMAIL_USER = os.getenv("EMAIL_USER")
-EMAIL_PASS = os.getenv("EMAIL_PASS")
-EMAIL_TO = os.getenv("EMAIL_TO")
+EMAIL_PASS = os.getenv("EMAIL_PASSWORD")
+EMAIL_TO = "edgardoms2010@gmail.com"   # <- Cambiar si deseas
 
-# =========================================================
-# FUNCIÓN PARA ENVIAR CORREOS
-# =========================================================
+# Parámetros estrategia
+EMA_FAST = 20
+EMA_SLOW = 50
+RSI_PERIOD = 14
+
+RSI_BUY = 55
+RSI_SELL = 45
+
+SL_PIPS = 300
+TP_PIPS = 600
+MAX_RISK_USD = 1.5
+
+# Pares versión Yahoo
+pairs = {
+    "EURUSD": "EURUSD=X",
+    "GBPUSD": "GBPUSD=X",
+    "USDJPY": "JPY=X",
+    "XAUUSD": "GC=F"
+}
+
+
+# ===============================
+# INDICADORES
+# ===============================
+
+def rsi(series, period=14):
+    delta = series.diff()
+    gain = delta.clip(lower=0)
+    loss = (-delta).clip(lower=0)
+
+    avg_gain = gain.rolling(period).mean()
+    avg_loss = loss.rolling(period).mean()
+
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
+
+# ===============================
+# ENVÍO DE EMAIL
+# ===============================
+
 def enviar_correo(asunto, mensaje):
     try:
-        msg = MIMEText(mensaje)
-        msg["Subject"] = asunto
+        msg = MIMEMultipart()
         msg["From"] = EMAIL_USER
         msg["To"] = EMAIL_TO
+        msg["Subject"] = asunto
+        msg.attach(MIMEText(mensaje, "plain"))
 
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(EMAIL_USER, EMAIL_PASS)
-            server.sendmail(EMAIL_USER, EMAIL_TO, msg.as_string())
+        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server.starttls()
+        server.login(EMAIL_USER, EMAIL_PASS)
+        server.send_message(msg)
+        server.quit()
 
-        print("Correo enviado ✔")
+        print("Correo enviado:", asunto)
     except Exception as e:
-        print("Error enviando correo:", e)
+        print("ERROR enviando correo:", e)
 
 
-# =========================================================
-# DESCARGA DE DATOS (ANTI BLOQUEO)
-# =========================================================
-def get_data(par):
-    try:
-        print(f"\nDescargando datos de {par}...")
-        df = yf.download(par, interval="1h", period="7d")
+# ===============================
+# GENERAR SEÑAL
+# ===============================
 
-        # Si no devuelve datos
-        if df is None or df.empty:
-            print("⚠ Sin datos suficientes.")
-            return None
-
-        df = df.dropna()
-        return df
-
-    except Exception as e:
-        print("⚠ Error descargando datos:", e)
-        return None
-
-
-# =========================================================
-# CÁLCULO DE INDICADORES
-# =========================================================
-def aplicar_indicadores(df):
-    df["EMA20"] = df["Close"].ewm(span=20).mean()
-    df["EMA50"] = df["Close"].ewm(span=50).mean()
-
-    # RSI manual
-    delta = df["Close"].diff()
-    up = delta.clip(lower=0)
-    down = -delta.clip(upper=0)
-    rs = up.rolling(14).mean() / down.rolling(14).mean()
-    df["RSI"] = 100 - (100 / (1 + rs))
-
-    df.dropna(inplace=True)
-    return df
-
-
-# =========================================================
-# ESTRATEGIA
-# =========================================================
 def generar_senal(df, par):
+    # EMA
+    df["EMA20"] = df["Close"].ewm(span=20, adjust=False).mean()
+    df["EMA50"] = df["Close"].ewm(span=50, adjust=False).mean()
 
-    c = df.iloc[-1]  # última vela
-    prev = df.iloc[-2]  # vela anterior
+    # RSI
+    df["RSI"] = rsi(df["Close"], RSI_PERIOD)
 
-    # Condiciones BUY
-    buy = (
-        c["EMA20"] > c["EMA50"] and
-        prev["EMA20"] <= prev["EMA50"] and
-        c["RSI"] > 50 and
-        c["Close"] > c["Open"]  # vela verde
-    )
+    c = df.iloc[-1]     # última vela
+    p = df.iloc[-2]     # vela anterior
 
-    # Condiciones SELL
-    sell = (
-        c["EMA20"] < c["EMA50"] and
-        prev["EMA20"] >= prev["EMA50"] and
-        c["RSI"] < 50 and
-        c["Close"] < c["Open"]  # vela roja
-    )
+    # CRUCE
+    cruce_up = p["EMA20"] <= p["EMA50"] and c["EMA20"] > c["EMA50"]
+    cruce_down = p["EMA20"] >= p["EMA50"] and c["EMA20"] < c["EMA50"]
 
-    if buy:
-        entry = float(c["Close"])
-        sl = round(entry - (entry * 0.003), 5)  # 30 pips approx
-        tp = round(entry + (entry * 0.006), 5)  # 60 pips approx
+    # Velas
+    vela_verde = c["Close"] > c["Open"]
+    vela_roja = c["Close"] < c["Open"]
 
-        return f"""📈 **SEÑAL DE COMPRA ({par})**
+    # Señal BUY
+    if cruce_up and vela_verde and c["RSI"] > RSI_BUY:
+        return {
+            "tipo": "BUY",
+            "entrada": float(c["Close"]),
+        }
 
-Entrada: {entry}
-Stop Loss: {sl}
-Take Profit: {tp}
-
-Condiciones:
-- EMA20 > EMA50
-- RSI > 50
-- Vela verde de confirmación
-"""
-
-    if sell:
-        entry = float(c["Close"])
-        sl = round(entry + (entry * 0.003), 5)
-        tp = round(entry - (entry * 0.006), 5)
-
-        return f"""📉 **SEÑAL DE VENTA ({par})**
-
-Entrada: {entry}
-Stop Loss: {sl}
-Take Profit: {tp}
-
-Condiciones:
-- EMA20 < EMA50
-- RSI < 50
-- Vela roja de confirmación
-"""
+    # Señal SELL
+    if cruce_down and vela_roja and c["RSI"] < RSI_SELL:
+        return {
+            "tipo": "SELL",
+            "entrada": float(c["Close"]),
+        }
 
     return None
 
 
-# =========================================================
-# PARES A ANALIZAR
-# =========================================================
-pares = ["EURUSD=X", "GBPUSD=X", "USDJPY=X", "XAUUSD=X"]
+# ===============================
+# LOOP PRINCIPAL
+# ===============================
+
+def pip_value(symbol):
+    if "JPY" in symbol:
+        return 0.01
+    if "XAU" in symbol:
+        return 0.1
+    return 0.0001
 
 
-# =========================================================
-# MAIN LOOP (GitHub Actions)
-# =========================================================
-print("\n=== BOT EJECUTÁNDOSE (YFINANCE) ===\n")
+if __name__ == "__main__":
+    print("=== BOT EJECUTÁNDOSE (YFINANCE) ===\n")
 
-for par in pares:
-    df = get_data(par)
-    time.sleep(2)  # pequeña pausa anti bloqueo
+    for par, ticker in pairs.items():
+        print(f"\nDescargando datos de {ticker}...")
 
-    if df is None:
-        continue
+        df = yf.download(ticker, interval="1h", period="7d")
+        if df.empty:
+            print("Sin datos suficientes.")
+            continue
 
-    df = aplicar_indicadores(df)
-    senal = generar_senal(df, par)
+        senal = generar_senal(df, par)
 
-    if senal:
-        enviar_correo(f"Señal detectada: {par}", senal)
-        print(senal)
-    else:
-        print(f"Sin señal en {par}")
+        if senal:
+            entry = senal["entrada"]
+            pv = pip_value(par)
 
-print("\n--- Fin de ejecución ---")
+            if senal["tipo"] == "BUY":
+                sl = entry - SL_PIPS * pv
+                tp = entry + TP_PIPS * pv
+            else:
+                sl = entry + SL_PIPS * pv
+                tp = entry - TP_PIPS * pv
+
+            mensaje = f"""
+🔔 Señal {senal['tipo']} CONFIRMADA en {par}
+
+Entrada: {entry}
+Stop Loss: {sl}
+Take Profit: {tp}
+RSI: {df['RSI'].iloc[-1]:.1f}
+"""
+
+            enviar_correo(f"{senal['tipo']} Confirmado {par}", mensaje)
+
+        time.sleep(1)
+
+    print("\nNo hubo más señales esta hora.\n")
