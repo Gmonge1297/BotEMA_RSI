@@ -1,217 +1,149 @@
+import yfinance as yf
 import pandas as pd
 import numpy as np
-import datetime as dt
-import pytz
-import time
 import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-import yfinance as yf
 import os
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 
+# ---------------------------------------
+# CONFIGURACIÓN DEL BOT
+# ---------------------------------------
 
-# ===============================
-# CONFIGURACIÓN
-# ===============================
-
-CR_TZ = pytz.timezone("America/Costa_Rica")
-
-EMAIL_USER = os.getenv("EMAIL_USER")      # Gmail del bot
-EMAIL_PASS = os.getenv("EMAIL_PASSWORD")  # App Password
-EMAIL_TO   = os.getenv("EMAIL_TO")        # Gmail donde recibirás señales
-
-EMA_FAST = 20
-EMA_SLOW = 50
-RSI_PERIOD = 14
-
-RSI_BUY = 55
-RSI_SELL = 45
-
-SL_PIPS = 300
-TP_PIPS = 600
-MAX_RISK_USD = 1.5
-
-
-# Pares y sus tickers en Yahoo
-PAIRS = {
+PARES = {
     "EURUSD": "EURUSD=X",
     "GBPUSD": "GBPUSD=X",
-    "USDJPY": "JPY=X",
-    "XAUUSD": "GC=F"
+    "USDJPY": "USDJPY=X",
+    "XAUUSD": "GC=F"           # Gold
 }
 
+EMAIL_USER = os.getenv("EMAIL_USER")
+EMAIL_PASS = os.getenv("EMAIL_PASSWORD")
+EMAIL_TO = os.getenv("EMAIL_TO", EMAIL_USER)
 
-# ===============================
-# INDICADORES
-# ===============================
+# ---------------------------------------
+# CÁLCULO DE INDICADORES
+# ---------------------------------------
 
-def ema(series, span):
-    return series.ewm(span=span, adjust=False).mean()
+def calcular_indicadores(df):
+    df["ema20"] = df["close"].ewm(span=20, adjust=False).mean()
+    df["ema50"] = df["close"].ewm(span=50, adjust=False).mean()
 
-
-def rsi(series, period=14):
-    delta = series.diff()
+    delta = df["close"].diff()
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
 
-    avg_gain = pd.Series(gain).rolling(window=period).mean()
-    avg_loss = pd.Series(loss).rolling(window=period).mean()
-    rs = avg_gain / avg_loss
+    roll_up = pd.Series(gain).rolling(14).mean()
+    roll_down = pd.Series(loss).rolling(14).mean()
 
-    return 100 - (100 / (1 + rs))
+    rs = roll_up / roll_down
+    df["rsi"] = 100 - (100 / (1 + rs))
 
-
-# ===============================
-# EMAIL HTML
-# ===============================
-
-def send_email(subject, html_body):
-    try:
-        msg = MIMEMultipart("alternative")
-        msg["From"] = EMAIL_USER
-        msg["To"] = EMAIL_TO
-        msg["Subject"] = subject
-
-        msg.attach(MIMEText(html_body, "html"))
-
-        server = smtplib.SMTP("smtp.gmail.com", 587)
-        server.starttls()
-        server.login(EMAIL_USER, EMAIL_PASS)
-        server.send_message(msg)
-        server.quit()
-
-        print("Correo enviado:", subject)
-    except Exception as e:
-        print("Error enviando correo:", e)
+    return df
 
 
-# ===============================
-# VALOR DE PIP Y LOTE
-# ===============================
-
-def pip_value(symbol):
-    if "JPY" in symbol:
-        return 0.01
-    if "XAU" in symbol:
-        return 0.1
-    return 0.0001
-
-
-def calculate_lot(entry, sl, max_risk, symbol):
-    pip = pip_value(symbol)
-    sl_pips = abs((entry - sl) / pip)
-    if sl_pips == 0:
-        return 0.01
-
-    value_per_pip_0_01 = 0.10
-    lot = max_risk / (sl_pips * value_per_pip_0_01)
-
-    return max(round(lot, 2), 0.01)
-
-
-# ===============================
+# ---------------------------------------
 # GENERAR SEÑAL
-# ===============================
+# ---------------------------------------
 
-def generar_senal(df, symbol):
-    if df is None or df.empty or len(df) < 60:
-        print("Sin datos suficientes.\n")
-        return None
+def generar_senal(df, par):
+    df = calcular_indicadores(df)
 
-    # Normalizar columnas a minúscula
-    df.columns = df.columns.str.lower()
+    c = df.iloc[-1]      # vela actual
+    p = df.iloc[-2]      # vela previa
 
-    close = df["close"]
-    openv = df["open"]
+    # Cruce alcista → BUY
+    cruce_up = (p["ema20"] <= p["ema50"]) and (c["ema20"] > c["ema50"])
 
-    df["ema20"] = ema(close, EMA_FAST)
-    df["ema50"] = ema(close, EMA_SLOW)
-    df["rsi"] = rsi(close, RSI_PERIOD)
+    # Cruce bajista → SELL
+    cruce_down = (p["ema20"] >= p["ema50"]) and (c["ema20"] < c["ema50"])
 
-    # Velas
-    p = df.iloc[-2]   # vela previa
-    c = df.iloc[-1]   # última vela
+    rsi_buy = c["rsi"] < 30
+    rsi_sell = c["rsi"] > 70
 
-    # Cruces
-    cruce_up = p["ema20"] <= p["ema50"] and c["ema20"] > c["ema50"]
-    cruce_dn = p["ema20"] >= p["ema50"] and c["ema20"] < c["ema50"]
+    precio_actual = c["close"]
 
-    # Confirmación de compra
-    buy_ok = (
-        cruce_up and
-        c["close"] > c["open"] and
-        c["rsi"] > RSI_BUY
-    )
+    if cruce_up and rsi_buy:
+        tp = precio_actual * 1.0020
+        sl = precio_actual * 0.9980
+        return "BUY", precio_actual, tp, sl
 
-    # Confirmación de venta
-    sell_ok = (
-        cruce_dn and
-        c["close"] < c["open"] and
-        c["rsi"] < RSI_SELL
-    )
-
-    if buy_ok:
-        entry = float(c["close"])
-        sl = entry - SL_PIPS * pip_value(symbol)
-        tp = entry + TP_PIPS * pip_value(symbol)
-        lot = calculate_lot(entry, sl, MAX_RISK_USD, symbol)
-
-        return {
-            "tipo": "BUY",
-            "entry": entry,
-            "sl": sl,
-            "tp": tp,
-            "rsi": float(c["rsi"]),
-            "lot": lot
-        }
-
-    if sell_ok:
-        entry = float(c["close"])
-        sl = entry + SL_PIPS * pip_value(symbol)
-        tp = entry - TP_PIPS * pip_value(symbol)
-        lot = calculate_lot(entry, sl, MAX_RISK_USD, symbol)
-
-        return {
-            "tipo": "SELL",
-            "entry": entry,
-            "sl": sl,
-            "tp": tp,
-            "rsi": float(c["rsi"]),
-            "lot": lot
-        }
+    if cruce_down and rsi_sell:
+        tp = precio_actual * 0.9980
+        sl = precio_actual * 1.0020
+        return "SELL", precio_actual, tp, sl
 
     return None
 
 
-# ===============================
-# LOOP PRINCIPAL
-# ===============================
+# ---------------------------------------
+# ENVIAR CORREO HTML
+# ---------------------------------------
 
-if __name__ == "__main__":
-    print("=== BOT EJECUTANDO (YFINANCE + TP/SL + HTML) ===\n")
+def enviar_correo_html(par, senal, precio, tp, sl):
+    mensaje = MIMEMultipart("alternative")
+    mensaje["Subject"] = f"📌 Señal Detectada: {par} - {senal}"
+    mensaje["From"] = EMAIL_USER
+    mensaje["To"] = EMAIL_TO
 
-    for par, ticker in PAIRS.items():
-        print(f"\nDescargando datos de {ticker}...")
-        df = yf.download(ticker, interval="1h", period="7d")
-        
-        # Normalizar columnas apenas se descargan
-        df.columns = df.columns.str.lower()
+    html = f"""
+    <html>
+        <body>
+            <h2>📈 Señal detectada en {par}</h2>
+            <p><b>Tipo:</b> {senal}</p>
+            <p><b>Precio actual:</b> {precio:.5f}</p>
+            <p><b>Take Profit:</b> {tp:.5f}</p>
+            <p><b>Stop Loss:</b> {sl:.5f}</p>
+            <br>
+            <p>Bot EMA20/EMA50 + RSI<br>
+            <small>Notificación automática</small></p>
+        </body>
+    </html>
+    """
 
-        senal = generar_senal(df, par)
+    mensaje.attach(MIMEText(html, "html"))
 
-        if senal:
-            html = f"""
-            <h2>📌 Señal {senal['tipo']} Confirmada - {par}</h2>
-            <p><b>Entrada:</b> {senal['entry']}</p>
-            <p><b>Stop Loss:</b> {senal['sl']}</p>
-            <p><b>Take Profit:</b> {senal['tp']}</p>
-            <p><b>RSI:</b> {senal['rsi']}</p>
-            <p><b>Lote sugerido:</b> {senal['lot']}</p>
-            <p><b>Riesgo fijo:</b> ${MAX_RISK_USD}</p>
-            """
+    try:
+        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server.starttls()
+        server.login(EMAIL_USER, EMAIL_PASS)
+        server.sendmail(EMAIL_USER, EMAIL_TO, mensaje.as_string())
+        server.quit()
+        print(f"📧 Email enviado para {par}")
+    except Exception as e:
+        print("❌ Error enviando correo:", e)
 
-            send_email(f"{senal['tipo']} Confirmado - {par}", html)
 
-        time.sleep(1)
+# ---------------------------------------
+# PROCESO PRINCIPAL
+# ---------------------------------------
 
-    print("\nNo hubo señales esta hora.\n")
+print("\n=== BOT EJECUTANDO (YFINANCE + TP/SL + HTML) ===\n")
+
+for par, ticker in PARES.items():
+    print(f"\nDescargando datos de {ticker}...")
+
+    df = yf.download(ticker, interval="1h", period="7d")
+
+    if df.empty:
+        print("❌ Sin datos. Se omite.")
+        continue
+
+    # NORMALIZACIÓN DE COLUMNAS
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = ['_'.join(col).strip() for col in df.columns.values]
+
+    df.columns = df.columns.str.lower()
+
+    if "close" not in df.columns:
+        print("❌ No existe columna CLOSE en los datos. Se omite.")
+        continue
+
+    senal = generar_senal(df, par)
+
+    if senal:
+        tipo, precio, tp, sl = senal
+        print(f"✔ Señal detectada: {par} → {tipo}")
+        enviar_correo_html(par, tipo, precio, tp, sl)
+    else:
+        print(f"— No hay señales en {par}")
