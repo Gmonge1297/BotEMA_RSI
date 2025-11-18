@@ -31,7 +31,7 @@ PAIRS = {
     "EURUSD": "EURUSD=X",
     "GBPUSD": "GBPUSD=X",
     "USDJPY": "USDJPY=X",
-    "XAUUSD": "XAUUSD=X"
+    "XAUUSD": "GC=F"
 }
 
 EMA_FAST = 20
