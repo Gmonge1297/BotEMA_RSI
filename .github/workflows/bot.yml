@@ -26,7 +26,7 @@ jobs:
       - name: Run trading bot
         env:
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
-          EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
         run: |
           echo "=== Ejecutando Bot (yfinance) ==="
