@@ -1,71 +1,54 @@
 import yfinance as yf
 import pandas as pd
-import numpy as np
-import requests
 import json
 from datetime import datetime
 
-# =======================
-# CONFIGURACIÓN
-# =======================
+# ======================================================
+# CONFIG
+# ======================================================
 
-TELEGRAM_TOKEN = "AQUI_TU_TOKEN"
-TELEGRAM_CHAT_ID = "AQUI_TU_CHAT_ID"
+INTERVAL = "15m"
+PERIOD = "5d"
 
-SIMBOLOS = {
+SYMBOLS = {
     "EURUSD": "EURUSD=X",
+    "GOLD": "GC=F"
 }
 
-INTERVAL = "5m"
-PERIOD = "1d"
 LAST_TRADE_FILE = "last_trade.json"
 
 
-# =======================
-# FUNCIONES UTILITARIAS
-# =======================
-
-def enviar_alerta(msg: str):
-    """ Envía mensaje a Telegram """
-    print("\n===== ALERTA ENVIADA =====")
-    print(msg)
-    try:
-        requests.get(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            params={"chat_id": TELEGRAM_CHAT_ID, "text": msg}
-        )
-    except:
-        pass
-
+# ======================================================
+# FUNCIONES AUXILIARES
+# ======================================================
 
 def cargar_ultimo_trade():
     try:
         with open(LAST_TRADE_FILE, "r") as f:
             return json.load(f)
     except:
-        return {}
+        return None
 
 
 def guardar_ultimo_trade(data):
     with open(LAST_TRADE_FILE, "w") as f:
-        json.dump(data, f)
+        json.dump(data, f, indent=4)
 
 
-# =======================
-# Cálculo de indicadores
-# =======================
+# ======================================================
+# INDICADORES
+# ======================================================
 
-def calcular_rsi(df, period=14):
-    """ Cálculo estandar del RSI, corregido para evitar arrays 2D """
-
+def calcular_RSI(df, period=14):
     delta = df["Close"].diff()
+    up = delta.clip(lower=0)
+    down = (-delta).clip(lower=0)
 
-    gain = (delta.where(delta > 0, 0)).rolling(period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(period).mean()
+    roll_up = pd.Series(up).rolling(period).mean()
+    roll_down = pd.Series(down).rolling(period).mean()
 
-    rs = gain / loss
-    rsi = 100 - (100 / (1 + rs))
-
+    RS = roll_up / roll_down
+    rsi = 100 - (100 / (1 + RS))
     df["RSI"] = rsi
     return df
 
@@ -73,20 +56,24 @@ def calcular_rsi(df, period=14):
 def calcular_indicadores(df):
     df["EMA20"] = df["Close"].ewm(span=20, adjust=False).mean()
     df["EMA50"] = df["Close"].ewm(span=50, adjust=False).mean()
-    df = calcular_rsi(df)
-    return df
+    df = calcular_RSI(df)
+    return df.dropna().reset_index(drop=True)
 
 
-# =======================
-# Lógica de señales
-# =======================
+# ======================================================
+# DETECTAR SEÑAL DE ENTRADA (AGRESIVA)
+# ======================================================
 
 def detectar_senal(df):
-    df = df.dropna()
+    # Asegurar índice limpio
+    df = df.dropna().reset_index(drop=True)
+    if len(df) < 3:
+        return None
+
     last = df.iloc[-1]
     prev = df.iloc[-2]
 
-    # Condiciones BUY agresiva
+    # BUY agresivo
     if (
         prev["EMA20"] < prev["EMA50"] and
         last["EMA20"] > last["EMA50"] and
@@ -94,7 +81,7 @@ def detectar_senal(df):
     ):
         return "BUY"
 
-    # Condiciones SELL agresiva
+    # SELL agresivo
     if (
         prev["EMA20"] > prev["EMA50"] and
         last["EMA20"] < last["EMA50"] and
@@ -105,70 +92,115 @@ def detectar_senal(df):
     return None
 
 
-# =======================
-# Procesamiento por símbolo
-# =======================
+# ======================================================
+# DETECTAR SEÑAL DE SALIDA
+# ======================================================
+
+def check_exit_signal(df, entry_price, direction):
+    df = df.dropna().reset_index(drop=True)
+    if len(df) < 5:
+        return False
+
+    latest = df.iloc[-1]
+    prev = df.iloc[-2]
+    ema20 = df["EMA20"]
+
+    conditions = 0
+
+    # 1) EMA20 plana por 3 velas
+    if (
+        abs(ema20.iloc[-1] - ema20.iloc[-2]) < 0.10 and
+        abs(ema20.iloc[-2] - ema20.iloc[-3]) < 0.10
+    ):
+        conditions += 1
+
+    # 2) RSI contratrend
+    if direction == "BUY" and latest["RSI"] < 48:
+        conditions += 1
+    if direction == "SELL" and latest["RSI"] > 52:
+        conditions += 1
+
+    # 3) Dos velas contra tendencia respecto a EMA20
+    if direction == "BUY":
+        if latest["Close"] < latest["EMA20"] and prev["Close"] < prev["EMA20"]:
+            conditions += 1
+    else:
+        if latest["Close"] > latest["EMA20"] and prev["Close"] > prev["EMA20"]:
+            conditions += 1
+
+    # 4) Vela fuerte rompe extremos recientes
+    if direction == "BUY":
+        if latest["Low"] < min(df["Low"].iloc[-4:-1]):
+            conditions += 1
+    else:
+        if latest["High"] > max(df["High"].iloc[-4:-1]):
+            conditions += 1
+
+    if conditions < 2:
+        return False
+
+    # ¿Está en ganancias?
+    current_price = latest["Close"]
+
+    if direction == "BUY" and current_price > entry_price:
+        return True
+    if direction == "SELL" and current_price < entry_price:
+        return True
+
+    return False
+
+
+# ======================================================
+# PROCESAR UN SÍMBOLO
+# ======================================================
 
 def procesar_simbolo(nombre, yf_symbol):
     print(f"\n[ {datetime.now()} ] Descargando datos de {nombre} ({yf_symbol})...")
 
     df = yf.download(yf_symbol, interval=INTERVAL, period=PERIOD, progress=False)
-
-    if df is None or df.empty:
-        print("❌ No se pudieron descargar datos")
+    if df is None or len(df) < 10:
+        print("No hay suficientes datos.")
         return
 
     df = calcular_indicadores(df)
 
-    senal = detectar_senal(df)
-    if not senal:
-        print(f"{nombre}: Sin señal.")
+    ultimo = cargar_ultimo_trade()
+
+    # Si no hay trade abierto → buscar señal de entrada
+    if not ultimo:
+        senal = detectar_senal(df)
+        if senal:
+            entry = df.iloc[-1]["Close"]
+            trade = {
+                "symbol": nombre,
+                "direction": senal,
+                "entry_price": float(entry),
+                "timestamp": str(datetime.now())
+            }
+            guardar_ultimo_trade(trade)
+            print(f"⚡ NUEVA SEÑAL {senal} en {nombre} — Entry {entry}")
         return
 
-    ultimo_trade = cargar_ultimo_trade()
-    ultimo = ultimo_trade.get(nombre, "NONE")
+    # Si hay trade abierto → buscar salida
+    if ultimo["symbol"] == nombre:
+        salir = check_exit_signal(
+            df,
+            ultimo["entry_price"],
+            ultimo["direction"]
+        )
 
-    # Evitar repetir misma señal
-    if senal == ultimo:
-        print(f"{nombre}: señal {senal} ignorada (misma que la anterior).")
-        return
-
-    # Guardar nueva señal
-    ultimo_trade[nombre] = senal
-    guardar_ultimo_trade(ultimo_trade)
-
-    # Datos finales
-    precio = round(df.iloc[-1]["Close"], 5)
-
-    # Calcular SL / TP agresivo
-    if senal == "BUY":
-        sl = round(precio - 0.0020, 5)
-        tp = round(precio + 0.0040, 5)
-    else:
-        sl = round(precio + 0.0020, 5)
-        tp = round(precio - 0.0040, 5)
-
-    mensaje = (
-        f"🔥 *SEÑAL DETECTADA ({nombre})*\n\n"
-        f"Tipo: *{senal}*\n"
-        f"Precio: {precio}\n"
-        f"SL: {sl}\n"
-        f"TP: {tp}\n"
-        f"Timeframe: {INTERVAL}\n\n"
-        f"EMA20/EMA50 + RSI"
-    )
-
-    enviar_alerta(mensaje)
+        if salir:
+            guardar_ultimo_trade(None)
+            print(f"🔔 ALERTA DE SALIDA: {nombre} — cerrar trade en profit")
+        else:
+            print(f"No hay salida aún ({nombre}).")
 
 
-# =======================
+# ======================================================
 # MAIN
-# =======================
+# ======================================================
 
-if __name__ == "__main__":
-    print("=== Bot EMA+RSI Agresivo ===\n")
-    
-    for nombre, yf_symbol in SIMBOLOS.items():
-        procesar_simbolo(nombre, yf_symbol)
+print("=== Bot EMA+RSI Agresivo ===")
 
-    print("\n=== Terminado ===")
+for nombre, yf_symbol in SYMBOLS.items():
+    procesar_simbolo(nombre, yf_symbol)
