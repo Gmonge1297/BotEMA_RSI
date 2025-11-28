@@ -12,7 +12,7 @@ from email.mime.text import MIMEText
 # ============================
 
 INTERVAL = "1h"
-PERIOD = "7d"
+PERIOD = "30d"
 
 ARCHIVO_TRADE = "last_trade.json"
 
