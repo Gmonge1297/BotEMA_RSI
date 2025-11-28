@@ -3,6 +3,7 @@
 
 import os
 import time
+import json
 import math
 import traceback
 import yfinance as yf
@@ -14,7 +15,7 @@ from email.mime.text import MIMEText
 import pytz
 import datetime as dt
 
-# === Import nuevo módulo de salida inteligente ===
+# === Import del módulo de salida inteligente ===
 from exit_rules import check_exit_signal
 
 
@@ -42,10 +43,8 @@ RSI_SELL_MAX = 50
 CROSS_LOOKBACK = 5
 LAST_CANDLE_OFFSET = -1
 
-SL_PIPS = 300
-TP_PIPS = 600
-SWING_LOOKBACK = 5
 SL_BUFFER_PIPS = 5
+SWING_LOOKBACK = 5
 
 RISK_PERCENT = float(os.getenv("RISK_PERCENT", "1.0"))
 ACCOUNT_BALANCE = float(os.getenv("ACCOUNT_BALANCE", "0") or 0.0)
@@ -61,14 +60,13 @@ EMAIL_TO = os.getenv("EMAIL_TO", EMAIL_USER)
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
 
-DEEP_LOG = False
-
 
 # -------------------------
 # Helpers
 # -------------------------
 def ema(series: pd.Series, span: int) -> pd.Series:
     return series.ewm(span=span, adjust=False).mean()
+
 
 def rsi(series: pd.Series, period: int = 14) -> pd.Series:
     delta = series.diff()
@@ -79,6 +77,7 @@ def rsi(series: pd.Series, period: int = 14) -> pd.Series:
     rs = avg_up / avg_down
     rsi_series = 100 - (100 / (1 + rs))
     return rsi_series
+
 
 def normalize_yf_df(df: pd.DataFrame) -> pd.DataFrame:
     if isinstance(df.columns, pd.MultiIndex):
@@ -99,6 +98,7 @@ def normalize_yf_df(df: pd.DataFrame) -> pd.DataFrame:
             df[key] = df[cand[0]]
     return df
 
+
 def pip_value(symbol: str) -> float:
     sym = symbol.upper()
     if "JPY" in sym:
@@ -107,15 +107,18 @@ def pip_value(symbol: str) -> float:
         return 0.01
     return 0.0001
 
+
 def calculate_lot_for_risk(entry_price: float, sl_price: float, max_risk_usd: float, symbol: str) -> float:
     pip = pip_value(symbol)
     sl_pips = abs((entry_price - sl_price) / pip) if pip != 0 else 0
     if sl_pips == 0 or max_risk_usd <= 0:
         return 0.01
+
     value_per_pip_per_0_01 = 0.10
     lot = max_risk_usd / (sl_pips * value_per_pip_per_0_01)
     lot = max(lot, 0.01)
     return round(lot, 2)
+
 
 def get_max_risk_usd() -> float:
     if ACCOUNT_BALANCE > 0 and RISK_PERCENT > 0:
@@ -140,7 +143,7 @@ def fetch_ohlc(yf_symbol: str, interval="1h", period="7d"):
 
 
 # -------------------------
-# Cross detection
+# Cross
 # -------------------------
 def cross_within(ema_fast, ema_slow, lookback=5):
     if len(ema_fast) < 2:
@@ -157,7 +160,7 @@ def cross_within(ema_fast, ema_slow, lookback=5):
 
 
 # -------------------------
-# Swing Stop Loss
+# Swing SL
 # -------------------------
 def calc_swing_sl(symbol, low_series, high_series, is_buy, lookback=5, buffer_pips=SL_BUFFER_PIPS):
     pip = pip_value(symbol)
@@ -171,7 +174,28 @@ def calc_swing_sl(symbol, low_series, high_series, is_buy, lookback=5, buffer_pi
 
 
 # -------------------------
-# ANALIZA PAR (entrada)
+# JSON Memory
+# -------------------------
+def load_last_trade():
+    if not os.path.exists("last_trade.json"):
+        return None
+    try:
+        with open("last_trade.json", "r") as f:
+            return json.load(f)
+    except:
+        return None
+
+
+def save_last_trade(data: dict):
+    try:
+        with open("last_trade.json", "w") as f:
+            json.dump(data, f)
+    except:
+        pass
+
+
+# -------------------------
+# Entrada
 # -------------------------
 def analyze_pair(label, yf_symbol):
     now = dt.datetime.now(CR_TZ).strftime("%Y-%m-%d %H:%M:%S")
@@ -200,16 +224,12 @@ def analyze_pair(label, yf_symbol):
     cross_up, cross_down = cross_within(ema_f, ema_s, CROSS_LOOKBACK)
 
     last = LAST_CANDLE_OFFSET
-    prev = LAST_CANDLE_OFFSET - 1
 
-    try:
-        price_close = float(close.iat[last])
-        price_open_last = float(openv.iat[last])
-        ema_f_last = float(ema_f.iat[last])
-        ema_s_last = float(ema_s.iat[last])
-        rsi_last = float(rsi_s.iat[last])
-    except:
-        return None
+    price_close = float(close.iat[last])
+    price_open_last = float(openv.iat[last])
+    ema_f_last = float(ema_f.iat[last])
+    ema_s_last = float(ema_s.iat[last])
+    rsi_last = float(rsi_s.iat[last])
 
     candle_bull = price_close > price_open_last
     candle_bear = price_close < price_open_last
@@ -229,7 +249,6 @@ def analyze_pair(label, yf_symbol):
 
     is_buy = buy
     sl = calc_swing_sl(yf_symbol, low, high, is_buy, SWING_LOOKBACK, SL_BUFFER_PIPS)
-
     entry = price_close
 
     if is_buy:
@@ -248,7 +267,8 @@ def analyze_pair(label, yf_symbol):
         "tp": float(tp),
         "rsi": float(rsi_last),
         "lot": lot,
-        "max_risk_usd": max_risk_usd
+        "max_risk_usd": max_risk_usd,
+        "timestamp": dt.datetime.now(CR_TZ).strftime("%Y-%m-%d %H:%M:%S")
     }
 
 
@@ -284,14 +304,14 @@ def build_html_message(sig):
       <body>
         <h2>Señal confirmada — {sig['pair']} ({sig['type']})</h2>
         <ul>
-          <li><b>Entrada:</b> {sig['entry']:.5ف}</li>
-          <li><b>Stop Loss:</b> {sig['sl']:.5ف}</li>
-          <li><b>Take Profit:</b> {sig['tp']:.5ف}</li>
+          <li><b>Entrada:</b> {sig['entry']:.5f}</li>
+          <li><b>Stop Loss:</b> {sig['sl']:.5f}</li>
+          <li><b>Take Profit:</b> {sig['tp']:.5f}</li>
           <li><b>RSI:</b> {sig['rsi']:.1f}</li>
           <li><b>Lote sugerido:</b> {sig['lot']}</li>
           <li><b>Riesgo por trade (USD):</b> {sig['max_risk_usd']:.2f}</li>
         </ul>
-        <p>Bot: EMA20/EMA50 + RSI + Salida Inteligente</p>
+        <p>Bot: EMA20/EMA50 + RSI + Salida Inteligente (agresiva)</p>
       </body>
     </html>
     """
@@ -301,47 +321,49 @@ def build_html_message(sig):
 # MAIN
 # -------------------------
 def main():
-    print("=== Bot Intermedio: EMA20/EMA50 + RSI + Salida Inteligente ===")
+    print("=== Bot EMA/RSI + Salida Inteligente ===")
 
-    # ========== PARTE 1 — detectar SALIDA inteligente ==========
-    try:
-        with open("last_trade.txt", "r") as f:
-            data = f.read().strip().split(",")
-            last_pair, last_type, last_entry = data[0], data[1], float(data[2])
-    except:
-        last_pair = None
+    # ====== PARTE 1: Salida inteligente ======
+    last_trade = load_last_trade()
 
-    if last_pair:
+    if last_trade:
+        last_pair = last_trade["pair"]
+        last_type = last_trade["type"]
+        last_entry = float(last_trade["entry"])
+
         yf_symbol = PAIRS.get(last_pair)
         df_exit = fetch_ohlc(yf_symbol, interval="1h", period="5d")
         df_exit = normalize_yf_df(df_exit)
 
         if not df_exit.empty:
-            if check_exit_signal(df_exit, last_entry, last_type):
+            should_exit = check_exit_signal(df_exit, last_entry, last_type)
+
+            if should_exit:
                 price_now = float(df_exit["close"].iloc[-1])
+
                 html = f"""
                 <html><body>
                 <h2>Salida recomendada — {last_pair}</h2>
-                <p>Se detecta reversa, y estás en profit.</p>
+                <p>Reversa detectada mientras estás en profit.</p>
                 <ul>
                     <li>Dirección: {last_type}</li>
                     <li>Entrada: {last_entry}</li>
                     <li>Precio actual: {price_now}</li>
                 </ul>
-                <p><b>Recomendación:</b> considerar cierre parcial o total.</p>
+                <p><b>Sugerencia:</b> Considera cerrar parcial o totalmente.</p>
                 </body></html>
                 """
                 send_email(f"Salida recomendada — {last_pair}", html)
 
-    # ========== PARTE 2 — detectar ENTRADAS ==========
+    # ====== PARTE 2: Entradas ======
     for label, sym in PAIRS.items():
         try:
             sig = analyze_pair(label, sym)
             time.sleep(PAUSE_BETWEEN_PAIRS)
+
             if sig:
-                # Guardar última operación
-                with open("last_trade.txt", "w") as f:
-                    f.write(f"{sig['pair']},{sig['type']},{sig['entry']}")
+
+                save_last_trade(sig)
 
                 subj = f"Señal {sig['type']} {sig['pair']} — Confirmada"
                 html = build_html_message(sig)
@@ -359,3 +381,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
