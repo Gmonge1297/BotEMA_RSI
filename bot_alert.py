@@ -1,384 +1,280 @@
-#!/usr/bin/env python3
-# coding: utf-8
-
-import os
-import time
-import json
-import math
-import traceback
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import json
+import os
 import smtplib
-from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-import pytz
-import datetime as dt
-
-# === Import del módulo de salida inteligente ===
-from exit_rules import check_exit_signal
+from datetime import datetime
 
 
-# -------------------------
-# CONFIG
-# -------------------------
-CR_TZ = pytz.timezone("America/Costa_Rica")
+# ============================================================
+#   CONFIGURACIÓN
+# ============================================================
 
-PAIRS = {
+SYMBOLS = {
     "EURUSD": "EURUSD=X",
     "GBPUSD": "GBPUSD=X",
     "USDJPY": "USDJPY=X",
-    "XAUUSD": "GC=F"
+    "XAUUSD": "GC=F"     # Oro
 }
 
-EMA_FAST = 20
-EMA_SLOW = 50
-RSI_PERIOD = 14
+INTERVAL = "1h"
+PERIOD = "7d"
 
-RSI_BUY_MIN = 50
-RSI_BUY_MAX = 65
-RSI_SELL_MIN = 35
-RSI_SELL_MAX = 50
-
-CROSS_LOOKBACK = 5
-LAST_CANDLE_OFFSET = -1
-
-SL_BUFFER_PIPS = 5
-SWING_LOOKBACK = 5
-
-RISK_PERCENT = float(os.getenv("RISK_PERCENT", "1.0"))
-ACCOUNT_BALANCE = float(os.getenv("ACCOUNT_BALANCE", "0") or 0.0)
-MAX_RISK_USD = float(os.getenv("MAX_RISK_USD", "0") or 0.0)
-
-PAUSE_BETWEEN_PAIRS = float(os.getenv("PAUSE_BETWEEN_PAIRS", "2"))
-YF_MAX_RETRIES = int(os.getenv("YF_MAX_RETRIES", "2"))
+FILE_LAST_TRADE = "last_trade.json"
 
 EMAIL_USER = os.getenv("EMAIL_USER")
-EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
-EMAIL_TO = os.getenv("EMAIL_TO", EMAIL_USER)
-
-SMTP_SERVER = "smtp.gmail.com"
-SMTP_PORT = 587
+EMAIL_PASS = os.getenv("EMAIL_PASS")
+EMAIL_TO = os.getenv("EMAIL_TO")
 
 
-# -------------------------
-# Helpers
-# -------------------------
-def ema(series: pd.Series, span: int) -> pd.Series:
-    return series.ewm(span=span, adjust=False).mean()
+# ============================================================
+#   FUNCIONES DE EMAIL
+# ============================================================
+
+def enviar_correo(asunto, mensaje):
+    if not EMAIL_USER or not EMAIL_PASS or not EMAIL_TO:
+        print("⚠️ No hay credenciales de correo configuradas.")
+        return
+
+    msg = MIMEText(mensaje, "plain")
+    msg["Subject"] = asunto
+    msg["From"] = EMAIL_USER
+    msg["To"] = EMAIL_TO
+
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(EMAIL_USER, EMAIL_PASS)
+            server.sendmail(EMAIL_USER, EMAIL_TO, msg.as_string())
+        print("📧 Correo enviado.")
+    except Exception as e:
+        print(f"Error enviando correo: {e}")
 
 
-def rsi(series: pd.Series, period: int = 14) -> pd.Series:
-    delta = series.diff()
-    up = delta.clip(lower=0)
-    down = -delta.clip(upper=0)
-    avg_up = up.ewm(alpha=1/period, adjust=False).mean()
-    avg_down = down.ewm(alpha=1/period, adjust=False).mean()
-    rs = avg_up / avg_down
-    rsi_series = 100 - (100 / (1 + rs))
-    return rsi_series
+# ============================================================
+#   GUARDAR Y LEER ÚLTIMO TRADE
+# ============================================================
+
+def cargar_last_trade():
+    if not os.path.exists(FILE_LAST_TRADE):
+        return None
+    try:
+        with open(FILE_LAST_TRADE, "r") as f:
+            data = json.load(f)
+        return data
+    except:
+        return None
 
 
-def normalize_yf_df(df: pd.DataFrame) -> pd.DataFrame:
-    if isinstance(df.columns, pd.MultiIndex):
-        cols = []
-        for col in df.columns.values:
-            cols.append("_".join([str(p) for p in col if p and str(p).strip()]))
-        df.columns = cols
-    df.columns = [c.lower() for c in df.columns]
+def guardar_last_trade(data):
+    with open(FILE_LAST_TRADE, "w") as f:
+        json.dump(data, f, indent=4)
 
-    close_candidates = [c for c in df.columns if "close" in c]
-    if not close_candidates:
-        return pd.DataFrame()
 
-    df["close"] = df[close_candidates[0]]
-    for key in ("open", "high", "low"):
-        cand = [c for c in df.columns if key in c]
-        if cand:
-            df[key] = df[cand[0]]
+def limpiar_last_trade():
+    with open(FILE_LAST_TRADE, "w") as f:
+        f.write("{}")
+
+
+# ============================================================
+#   ESTRATEGIA PRINCIPAL: EMA20 / EMA50 + RSI + VELA CONFIRMATORIA
+# ============================================================
+
+def calcular_indicadores(df):
+    df["EMA20"] = df["Close"].ewm(span=20).mean()
+    df["EMA50"] = df["Close"].ewm(span=50).mean()
+
+    delta = df["Close"].diff()
+    up = np.where(delta > 0, delta, 0)
+    down = np.where(delta < 0, -delta, 0)
+    roll_up = pd.Series(up).rolling(14).mean()
+    roll_down = pd.Series(down).rolling(14).mean()
+    rs = roll_up / roll_down
+    df["RSI"] = 100 - (100 / (1 + rs))
+
     return df
 
 
-def pip_value(symbol: str) -> float:
-    sym = symbol.upper()
-    if "JPY" in sym:
-        return 0.01
-    if "GC=" in sym or "XAU" in sym:
-        return 0.01
-    return 0.0001
+def detectar_entrada(df):
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    ema20 = df["EMA20"]
+    ema50 = df["EMA50"]
+
+    # BUY
+    if (
+        prev["EMA20"] < prev["EMA50"] and
+        last["EMA20"] > last["EMA50"] and
+        last["RSI"] > 55 and last["RSI"] < 70 and
+        last["Close"] > last["Open"]
+    ):
+        return "BUY"
+
+    # SELL
+    if (
+        prev["EMA20"] > prev["EMA50"] and
+        last["EMA20"] < last["EMA50"] and
+        last["RSI"] < 45 and last["RSI"] > 30 and
+        last["Close"] < last["Open"]
+    ):
+        return "SELL"
+
+    return None
 
 
-def calculate_lot_for_risk(entry_price: float, sl_price: float, max_risk_usd: float, symbol: str) -> float:
-    pip = pip_value(symbol)
-    sl_pips = abs((entry_price - sl_price) / pip) if pip != 0 else 0
-    if sl_pips == 0 or max_risk_usd <= 0:
-        return 0.01
+# ============================================================
+#   ESTRATEGIA DE SALIDA ANTICIPADA (EXIT SIGNAL)
+# ============================================================
 
-    value_per_pip_per_0_01 = 0.10
-    lot = max_risk_usd / (sl_pips * value_per_pip_per_0_01)
-    lot = max(lot, 0.01)
-    return round(lot, 2)
-
-
-def get_max_risk_usd() -> float:
-    if ACCOUNT_BALANCE > 0 and RISK_PERCENT > 0:
-        return ACCOUNT_BALANCE * (RISK_PERCENT / 100.0)
-    if MAX_RISK_USD > 0:
-        return MAX_RISK_USD
-    return 1.0
-
-
-# -------------------------
-# yfinance
-# -------------------------
-def fetch_ohlc(yf_symbol: str, interval="1h", period="7d"):
-    for attempt in range(1, YF_MAX_RETRIES + 2):
-        try:
-            df = yf.download(yf_symbol, interval=interval, period=period, progress=False)
-            return df
-        except:
-            time.sleep(1 + attempt)
-            continue
-    return pd.DataFrame()
-
-
-# -------------------------
-# Cross
-# -------------------------
-def cross_within(ema_fast, ema_slow, lookback=5):
-    if len(ema_fast) < 2:
-        return False, False
-    start = max(1, len(ema_fast) - lookback)
-    cross_up = cross_down = False
-
-    for i in range(start, len(ema_fast)):
-        if ema_fast.iat[i-1] <= ema_slow.iat[i-1] and ema_fast.iat[i] > ema_slow.iat[i]:
-            cross_up = True
-        if ema_fast.iat[i-1] >= ema_slow.iat[i-1] and ema_fast.iat[i] < ema_slow.iat[i]:
-            cross_down = True
-    return cross_up, cross_down
-
-
-# -------------------------
-# Swing SL
-# -------------------------
-def calc_swing_sl(symbol, low_series, high_series, is_buy, lookback=5, buffer_pips=SL_BUFFER_PIPS):
-    pip = pip_value(symbol)
-    if is_buy:
-        swing_low = float(low_series.tail(lookback).min())
-        sl = swing_low - buffer_pips * pip
-    else:
-        swing_high = float(high_series.tail(lookback).max())
-        sl = swing_high + buffer_pips * pip
-    return sl
-
-
-# -------------------------
-# JSON Memory
-# -------------------------
-def load_last_trade():
-    if not os.path.exists("last_trade.json"):
-        return None
-    try:
-        with open("last_trade.json", "r") as f:
-            return json.load(f)
-    except:
-        return None
-
-
-def save_last_trade(data: dict):
-    try:
-        with open("last_trade.json", "w") as f:
-            json.dump(data, f)
-    except:
-        pass
-
-
-# -------------------------
-# Entrada
-# -------------------------
-def analyze_pair(label, yf_symbol):
-    now = dt.datetime.now(CR_TZ).strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{now}] Descargando datos de {label} ({yf_symbol})...")
-
-    df_raw = fetch_ohlc(yf_symbol)
-    if df_raw.empty:
-        return None
-
-    df = normalize_yf_df(df_raw)
-    if df.empty or "close" not in df.columns:
-        return None
-
-    if len(df) < (EMA_SLOW + RSI_PERIOD + 2):
-        return None
-
-    close = df["close"].astype(float)
-    low = df.get("low", close).astype(float)
-    high = df.get("high", close).astype(float)
-    openv = df.get("open", close).astype(float)
-
-    ema_f = ema(close, EMA_FAST)
-    ema_s = ema(close, EMA_SLOW)
-    rsi_s = rsi(close, RSI_PERIOD)
-
-    cross_up, cross_down = cross_within(ema_f, ema_s, CROSS_LOOKBACK)
-
-    last = LAST_CANDLE_OFFSET
-
-    price_close = float(close.iat[last])
-    price_open_last = float(openv.iat[last])
-    ema_f_last = float(ema_f.iat[last])
-    ema_s_last = float(ema_s.iat[last])
-    rsi_last = float(rsi_s.iat[last])
-
-    candle_bull = price_close > price_open_last
-    candle_bear = price_close < price_open_last
-
-    buy = sell = False
-
-    if cross_up and candle_bull and price_close > ema_f_last and price_close > ema_s_last:
-        if RSI_BUY_MIN <= rsi_last <= RSI_BUY_MAX:
-            buy = True
-
-    if cross_down and candle_bear and price_close < ema_f_last and price_close < ema_s_last:
-        if RSI_SELL_MIN <= rsi_last <= RSI_SELL_MAX:
-            sell = True
-
-    if not (buy or sell):
-        return None
-
-    is_buy = buy
-    sl = calc_swing_sl(yf_symbol, low, high, is_buy, SWING_LOOKBACK, SL_BUFFER_PIPS)
-    entry = price_close
-
-    if is_buy:
-        tp = entry + 2 * abs(entry - sl)
-    else:
-        tp = entry - 2 * abs(entry - sl)
-
-    max_risk_usd = get_max_risk_usd()
-    lot = calculate_lot_for_risk(entry, sl, max_risk_usd, yf_symbol)
-
-    return {
-        "pair": label,
-        "type": "BUY" if is_buy else "SELL",
-        "entry": float(entry),
-        "sl": float(sl),
-        "tp": float(tp),
-        "rsi": float(rsi_last),
-        "lot": lot,
-        "max_risk_usd": max_risk_usd,
-        "timestamp": dt.datetime.now(CR_TZ).strftime("%Y-%m-%d %H:%M:%S")
-    }
-
-
-# -------------------------
-# EMAIL
-# -------------------------
-def send_email(subject, html_body):
-    if not EMAIL_USER or not EMAIL_PASSWORD or not EMAIL_TO:
-        print("⚠️ Credenciales email no configuradas.")
-        return False
-    try:
-        msg = MIMEMultipart("alternative")
-        msg["Subject"] = subject
-        msg["From"] = EMAIL_USER
-        msg["To"] = EMAIL_TO
-        msg.attach(MIMEText(html_body, "html"))
-
-        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
-        server.starttls()
-        server.login(EMAIL_USER, EMAIL_PASSWORD)
-        server.sendmail(EMAIL_USER, EMAIL_TO, msg.as_string())
-        server.quit()
-        print(f"📧 Email enviado: {subject}")
-        return True
-    except Exception as e:
-        print("❌ Error enviando email:", e)
-        return False
-
-
-def build_html_message(sig):
-    return f"""
-    <html>
-      <body>
-        <h2>Señal confirmada — {sig['pair']} ({sig['type']})</h2>
-        <ul>
-          <li><b>Entrada:</b> {sig['entry']:.5f}</li>
-          <li><b>Stop Loss:</b> {sig['sl']:.5f}</li>
-          <li><b>Take Profit:</b> {sig['tp']:.5f}</li>
-          <li><b>RSI:</b> {sig['rsi']:.1f}</li>
-          <li><b>Lote sugerido:</b> {sig['lot']}</li>
-          <li><b>Riesgo por trade (USD):</b> {sig['max_risk_usd']:.2f}</li>
-        </ul>
-        <p>Bot: EMA20/EMA50 + RSI + Salida Inteligente (agresiva)</p>
-      </body>
-    </html>
+def check_exit_signal(df, entry_price, direction):
+    """
+    Detecta si hay señal de reversa.
+    Requiere que al menos 2 condiciones se cumplan.
     """
 
+    latest = df.iloc[-1]
+    prev = df.iloc[-2]
 
-# -------------------------
-# MAIN
-# -------------------------
-def main():
-    print("=== Bot EMA/RSI + Salida Inteligente ===")
+    conditions = 0
 
-    # ====== PARTE 1: Salida inteligente ======
-    last_trade = load_last_trade()
+    # 1. EMA20 se aplana
+    ema20 = df["EMA20"]
+    if abs(ema20.iloc[-1] - ema20.iloc[-2]) < 0.10 and abs(ema20.iloc[-2] - ema20.iloc[-3]) < 0.10:
+        conditions += 1
 
-    if last_trade:
-        last_pair = last_trade["pair"]
-        last_type = last_trade["type"]
-        last_entry = float(last_trade["entry"])
+    # 2. RSI cambia de dirección
+    if direction == "BUY" and latest["RSI"] < 48:
+        conditions += 1
+    if direction == "SELL" and latest["RSI"] > 52:
+        conditions += 1
 
-        yf_symbol = PAIRS.get(last_pair)
-        df_exit = fetch_ohlc(yf_symbol, interval="1h", period="5d")
-        df_exit = normalize_yf_df(df_exit)
+    # 3. Dos velas contra tendencia
+    if direction == "BUY":
+        if latest["Close"] < ema20.iloc[-1] and prev["Close"] < ema20.iloc[-2]:
+            conditions += 1
+    else:
+        if latest["Close"] > ema20.iloc[-1] and prev["Close"] > ema20.iloc[-2]:
+            conditions += 1
 
-        if not df_exit.empty:
-            should_exit = check_exit_signal(df_exit, last_entry, last_type)
+    # 4. Vela fuerte rompe niveles
+    if direction == "BUY":
+        if latest["Low"] < min(df["Low"].iloc[-4:-1]):
+            conditions += 1
+    else:
+        if latest["High"] > max(df["High"].iloc[-4:-1]):
+            conditions += 1
 
-            if should_exit:
-                price_now = float(df_exit["close"].iloc[-1])
+    # Necesitamos mínimo 2 condiciones
+    if conditions < 2:
+        return False
 
-                html = f"""
-                <html><body>
-                <h2>Salida recomendada — {last_pair}</h2>
-                <p>Reversa detectada mientras estás en profit.</p>
-                <ul>
-                    <li>Dirección: {last_type}</li>
-                    <li>Entrada: {last_entry}</li>
-                    <li>Precio actual: {price_now}</li>
-                </ul>
-                <p><b>Sugerencia:</b> Considera cerrar parcial o totalmente.</p>
-                </body></html>
-                """
-                send_email(f"Salida recomendada — {last_pair}", html)
+    # Confirmar que estamos en ganancias
+    current_price = latest["Close"]
 
-    # ====== PARTE 2: Entradas ======
-    for label, sym in PAIRS.items():
-        try:
-            sig = analyze_pair(label, sym)
-            time.sleep(PAUSE_BETWEEN_PAIRS)
+    if direction == "BUY" and current_price > entry_price:
+        return True
+    if direction == "SELL" and current_price < entry_price:
+        return True
 
-            if sig:
+    return False
 
-                save_last_trade(sig)
 
-                subj = f"Señal {sig['type']} {sig['pair']} — Confirmada"
-                html = build_html_message(sig)
-                send_email(subj, html)
-                print(f"Señal encontrada: {sig['pair']} {sig['type']}")
+# ============================================================
+#   TOMA DE BENEFICIO Y STOP LOSS
+# ============================================================
 
-            else:
-                print(f"— No hubo señal para {label}")
+def calcular_sl_tp(direction, entry_price, atr=30):
+    if direction == "BUY":
+        sl = entry_price - atr
+        tp = entry_price + atr * 2
+    else:
+        sl = entry_price + atr
+        tp = entry_price - atr * 2
+    return sl, tp
 
-        except Exception as e:
-            print(f"Error con {label}: {e}")
 
-    print("=== Fin ejecución ===")
+# ============================================================
+#   PROCESO PRINCIPAL
+# ============================================================
 
+def procesar_simbolo(nombre, yf_symbol):
+    print(f"[{datetime.now()}] Descargando datos de {nombre} ({yf_symbol})...")
+
+    df = yf.download(yf_symbol, interval=INTERVAL, period=PERIOD, progress=False)
+
+    if df is None or len(df) < 60:
+        print(f"❌ No hay datos suficientes para {nombre}")
+        return
+
+    df = calcular_indicadores(df)
+    df = df.dropna()
+
+    # --------------------------------------------------------
+    # 1. Revisar si hay un trade abierto
+    # --------------------------------------------------------
+    last_trade = cargar_last_trade()
+
+    if last_trade and last_trade.get("symbol") == nombre:
+        direction = last_trade["direction"]
+        entry = last_trade["entry"]
+
+        if check_exit_signal(df, entry, direction):
+            msg = f"""⛔ SALIDA ANTICIPADA (Reversal Detectado)
+Símbolo: {nombre}
+Dirección: {direction}
+Entrada: {entry}
+Precio actual: {df['Close'].iloc[-1]}
+
+El bot recomienda CERRAR YA para asegurar ganancias.
+"""
+            enviar_correo(f"SALIDA ANTICIPADA - {nombre}", msg)
+            print(msg)
+            limpiar_last_trade()
+            return
+
+    # --------------------------------------------------------
+    # 2. Buscar nueva entrada
+    # --------------------------------------------------------
+    señal = detectar_entrada(df)
+
+    if señal:
+        entry_price = df["Close"].iloc[-1]
+        sl, tp = calcular_sl_tp(señal, entry_price)
+
+        msg = f"""Señal confirmada — {nombre} ({señal})
+Entrada: {entry_price:.5f}
+Stop Loss: {sl:.5f}
+Take Profit: {tp:.5f}
+RSI: {df['RSI'].iloc[-1]:.1f}
+Bot: EMA20/EMA50 + RSI + Confirmación
+
+Generado: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+"""
+
+        enviar_correo(f"📈 Señal {nombre} - {señal}", msg)
+        print(msg)
+
+        # Guardar trade
+        guardar_last_trade({
+            "symbol": nombre,
+            "direction": señal,
+            "entry": entry_price
+        })
+
+    else:
+        print(f"— No hubo señal para {nombre}\n")
+
+
+# ============================================================
+#   MAIN
+# ============================================================
 
 if __name__ == "__main__":
-    main()
-    
+    print("=== Bot Intermedio: EMA20/EMA50 + RSI + Vela confirmatoria ===\n")
+
+    for nombre, yf_symbol in SYMBOLS.items():
+        procesar_simbolo(nombre, yf_symbol)
+
+    print("\n=== Fin ejecución ===")
