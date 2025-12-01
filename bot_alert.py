@@ -66,7 +66,7 @@ def calcular_indicadores(df):
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss.replace(0, np.nan)  # Evitar division by zero
     df["RSI"] = 100 - (100 / (1 + rs))
-    df["RSI"].fillna(50, inplace=True)  # Rellenar NaN con 50 (neutro)
+    df["RSI"] = df["RSI"].fillna(50)  # Rellenar NaN con 50 (neutro) - CORREGIDO SIN INPLACE
 
     return df
 
