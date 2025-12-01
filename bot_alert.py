@@ -1,187 +1,116 @@
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from datetime import datetime
-import pytz
 import smtplib
 from email.mime.text import MIMEText
+from datetime import datetime
 
-# ================================
-# CONFIGURACIÓN
-# ================================
-INTERVAL = "1h"
-PERIOD = "2d"   # siempre devuelve OHLC correctamente
-
-SYMBOLS = {
+# -------------------------------------------------
+# Configuración
+# -------------------------------------------------
+symbols = {
     "EURUSD": "EURUSD=X",
     "GBPUSD": "GBPUSD=X",
     "USDJPY": "USDJPY=X",
     "XAUUSD": "GC=F"
 }
 
-EMAIL_ENABLED = True
-EMAIL_FROM = "BOT@gmail.com"
-EMAIL_TO = "TU_CORREO"
-EMAIL_PASS = "APP_PASSWORD"
+interval = "15m"
+period = "5d"
 
-COSTA_RICA_TZ = pytz.timezone("America/Costa_Rica")
+EMAIL_USER = os.getenv("EMAIL_USER")
+EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
+EMAIL_TO = os.getenv("EMAIL_TO")
 
-
-# ================================
-# FUNCIÓN: ENVIAR EMAIL
-# ================================
-def send_email(subject, body):
-    if not EMAIL_ENABLED:
+# -------------------------------------------------
+# Función para enviar email
+# -------------------------------------------------
+def enviar_email(asunto, mensaje):
+    if not EMAIL_USER or not EMAIL_PASSWORD or not EMAIL_TO:
+        print("⚠️ Credenciales email no configuradas; no se envía correo.")
         return
 
-    msg = MIMEText(body)
-    msg["Subject"] = subject
-    msg["From"] = EMAIL_FROM
-    msg["To"] = EMAIL_TO
-
     try:
-        server = smtplib.SMTP_SSL("smtp.gmail.com", 465)
-        server.login(EMAIL_FROM, EMAIL_PASS)
-        server.sendmail(EMAIL_FROM, EMAIL_TO, msg.as_string())
+        msg = MIMEText(mensaje)
+        msg["Subject"] = asunto
+        msg["From"] = EMAIL_USER
+        msg["To"] = EMAIL_TO
+
+        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server.starttls()
+        server.login(EMAIL_USER, EMAIL_PASSWORD)
+        server.send_message(msg)
         server.quit()
-        print("📧 Email enviado.")
+
+        print(f"📧 Email enviado: {asunto}")
+
     except Exception as e:
-        print("❌ Error enviando email:", e)
+        print("⚠️ Error enviando email:", e)
 
-
-# ================================
-# FUNCIÓN: DESCARGAR DATA OHLC CORRECTA
-# ================================
-def download_clean(symbol):
-    """
-    Yahoo Finance a veces devuelve columnas con MultiIndex.
-    Esta función renombra correctamente los OHLC a:
-    ['Open', 'High', 'Low', 'Close', 'Volume']
-    """
-    df = yf.download(symbol, period=PERIOD, interval=INTERVAL, progress=False)
-
-    if df.empty:
-        print(f"❌ No hay datos para {symbol}")
-        return None
-
-    # Si trae MultiIndex (típico en Forex)
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = [c[0] for c in df.columns]
-
-    # A veces devuelve columnas duplicadas iguales: Close, Close, Close...
-    uniques = pd.unique(df.columns)
-    if len(uniques) == 1:
-        # entonces es: ['EURUSD=X', 'EURUSD=X', 'EURUSD=X', ...]
-        # mapeamos manualmente
-        df.columns = ["Open", "High", "Low", "Close", "Adj Close"]
-        df["Volume"] = 0
-
-    # Validación final
-    required = {"Open", "High", "Low", "Close"}
-    if not required.issubset(set(df.columns)):
-        print(f"⚠️ Data no contiene columnas OHLC necesarias. Columnas: {list(df.columns)}")
-        return None
-
-    return df
-
-
-# ================================
-# INDICADORES (EMA y RSI)
-# ================================
-def compute_indicators(df):
+# -------------------------------------------------
+# Lógica de estrategia (EMA20/EMA50 + RSI + vela)
+# -------------------------------------------------
+def obtener_senal(df, symbol):
     df["EMA20"] = df["Close"].ewm(span=20).mean()
     df["EMA50"] = df["Close"].ewm(span=50).mean()
+    df["RSI"] = calc_RSI(df["Close"])
 
-    # RSI
-    delta = df["Close"].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-    rs = gain / loss
-    df["RSI"] = 100 - (100 / (1 + rs))
+    # Última vela
+    c0 = df["Close"].iloc[-1]
+    o0 = df["Open"].iloc[-1]
 
-    return df
+    ema20 = df["EMA20"].iloc[-1]
+    ema50 = df["EMA50"].iloc[-1]
+    rsi = df["RSI"].iloc[-1]
 
+    # BUY
+    if ema20 > ema50 and rsi > 50 and c0 > o0:
+        return "BUY", c0
 
-# ================================
-# FUNCIÓN: GENERAR SEÑAL
-# ================================
-def check_signal(symbol, df):
-    df = df.dropna()
-    if len(df) < 3:
-        return None
+    # SELL
+    if ema20 < ema50 and rsi < 50 and c0 < o0:
+        return "SELL", c0
 
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
+    return None, None
 
-    # Tendencia
-    ema_bull = last["EMA20"] > last["EMA50"]
-    ema_bear = last["EMA20"] < last["EMA50"]
+# -------------------------------------------------
+# RSI original
+# -------------------------------------------------
+def calc_RSI(series, period=14):
+    delta = series.diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
 
-    # Velas
-    bullish_candle = last["Close"] > last["Open"]
-    bearish_candle = last["Close"] < last["Open"]
+    avg_gain = gain.rolling(period).mean()
+    avg_loss = loss.rolling(period).mean()
 
-    # Señal BUY
-    if ema_bull and prev["RSI"] < 30 and last["RSI"] > 30 and bullish_candle:
-        return {
-            "type": "BUY",
-            "price": last["Close"],
-            "sl": last["Low"],
-            "tp": last["Close"] + (last["Close"] - last["Low"]) * 2
-        }
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
 
-    # Señal SELL
-    if ema_bear and prev["RSI"] > 70 and last["RSI"] < 70 and bearish_candle:
-        return {
-            "type": "SELL",
-            "price": last["Close"],
-            "sl": last["High"],
-            "tp": last["Close"] - (last["High"] - last["Close"]) * 2
-        }
+# -------------------------------------------------
+# Ejecución principal
+# -------------------------------------------------
+print("=== Bot Intermedio: EMA20/EMA50 + RSI + Vela confirmatoria ===")
 
-    return None
+for name, yf_symbol in symbols.items():
+    print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Descargando datos de {name} ({yf_symbol})...")
 
+    df = yf.download(yf_symbol, interval=interval, period=period, progress=False)
 
-# ================================
-# PROGRAMA PRINCIPAL
-# ================================
-def run_bot():
-    print("\n=== Bot EMA + RSI ===\n")
+    signal, price = obtener_senal(df, name)
 
-    for name, ticker in SYMBOLS.items():
+    if signal is None:
+        print(f"— No hubo señal para {name}")
+        continue
 
-        print(f"[ {datetime.now(COSTA_RICA_TZ)} ] Descargando datos de {name} ({ticker})...")
+    # Mensaje para email
+    asunto = f"Señal {signal} {name} — EMA+RSI Confirmada"
+    mensaje = f"Se encontró señal {signal} en {name} al precio {price:.5f}"
 
-        df = download_clean(ticker)
+    enviar_email(asunto, mensaje)
 
-        if df is None:
-            continue
+    # Print EXACTO de los logs
+    print(f"\nSeñal encontrada: {name} {signal} (entrada {price:.5f})\n")
 
-        df = compute_indicators(df)
-
-        signal = check_signal(name, df)
-
-        if signal is None:
-            print("ℹ️ Sin señales.\n")
-            continue
-
-        # ===== MOSTRAR ALERTA =====
-        msg = (
-            f"📊 Señal detectada en {name}\n"
-            f"Tipo: {signal['type']}\n"
-            f"Precio entrada: {signal['price']}\n"
-            f"SL: {signal['sl']}\n"
-            f"TP: {signal['tp']}\n"
-            f"Hora CR: {datetime.now(COSTA_RICA_TZ)}"
-        )
-
-        print(msg)
-        send_email(f"Señal {signal['type']} - {name}", msg)
-        print("")
-
-    print("\n=== Fin ejecución ===\n")
-
-
-# Ejecutar
-if __name__ == "__main__":
-    run_bot()
+print("=== Fin ejecución ===")
