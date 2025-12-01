@@ -191,22 +191,72 @@ Generado: {now}
 
 active_trades = {}  # en memoria; opcional: persistir en archivo si querés
 
+def _flatten_columns(df):
+    """
+    Si df.columns es MultiIndex, devuelve una lista con la última etiqueta
+    de cada tupla; si no, devuelve la list(df.columns).
+    También renombra 'Adj Close' -> 'Close' por seguridad.
+    """
+    cols = []
+    if isinstance(df.columns, pd.MultiIndex):
+        for c in df.columns:
+            # tomar la última etiqueta no vacía del tuple
+            nc = None
+            for part in reversed(c):
+                if part and str(part).strip() != "":
+                    nc = str(part)
+                    break
+            if nc is None:
+                nc = str(c[-1])
+            if nc == "Adj Close":
+                nc = "Close"
+            cols.append(nc)
+    else:
+        for c in df.columns:
+            nc = str(c)
+            if nc == "Adj Close":
+                nc = "Close"
+            cols.append(nc)
+    return cols
+
 def process_symbol(name, symbol):
     global active_trades
 
     log(f"Descargando datos de {name} ({symbol})...")
 
     try:
-        df = yf.download(symbol, interval=INTERVAL, period=PERIOD, progress=False)
+        # activar auto_adjust=True evita futuros warnings y deja precios "limpios"
+        df = yf.download(symbol, interval=INTERVAL, period=PERIOD, progress=False, auto_adjust=True)
     except Exception as e:
         print(f"❌ Error descargando {name}: {e}\n")
         return
 
-    if df is None or df.empty or len(df) < 60:
+    if df is None or df.empty or len(df) < 2:
         print("⚠️ Sin suficientes datos.\n")
         return
 
-    # Normal: calculamos indicadores (calculate_indicators ya hace dropna)
+    # ==================================================
+    # Normalizar/flatten columnas (resuelve el error)
+    # ==================================================
+    try:
+        new_cols = _flatten_columns(df)
+        df.columns = new_cols
+    except Exception as e:
+        print(f"⚠️ Error al normalizar columnas para {name}: {e}")
+        print("Columnas originales:", df.columns)
+        return
+
+    if "Close" not in df.columns or "Open" not in df.columns:
+        print("⚠️ Data no contiene 'Open' o 'Close'. Columnas:", df.columns.tolist())
+        return
+
+    # eliminar nulos mínimos y validar longitud
+    df = df.dropna().copy()
+    if len(df) < 60:
+        print("⚠️ No hay suficientes velas (mínimo 60) después de dropna.\n")
+        return
+
+    # calcular indicadores
     try:
         df = calculate_indicators(df)
     except Exception as e:
@@ -223,9 +273,8 @@ def process_symbol(name, symbol):
     except Exception as e:
         print(f"⚠️ Error al leer últimos valores para debug en {name}: {e}")
         print(df.tail(2))
-        # No abortar, seguimos
 
-    # 1) detectar nueva señal
+    # 1) nueva señal
     try:
         signal = check_signal(df)
     except Exception as e:
@@ -266,7 +315,6 @@ def process_symbol(name, symbol):
                 print(f"⚠️ Cambio de tendencia detectado en {name}. Enviando alerta de cierre parcial...")
                 email = build_partial_close_email(name, entry, price)
                 send_email(f"⚠️ Cerrar con ganancia parcial — {name}", email)
-                # eliminar de active_trades (para no repetir)
                 del active_trades[name]
                 return
 
