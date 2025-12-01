@@ -31,32 +31,41 @@ def log(msg):
     print(f"[ {cr} ] {msg}")
 
 def calculate_indicators(df):
-    df["EMA20"] = df["Close"].rolling(EMA_FAST).mean()
-    df["EMA50"] = df["Close"].rolling(EMA_SLOW).mean()
+    close = df["Close"]
 
-    delta = df["Close"].diff()
-    gain = delta.clip(lower=0).rolling(RSI_PERIOD).mean()
-    loss = (-delta.clip(upper=0)).rolling(RSI_PERIOD).mean()
-    rs = gain / loss
+    # EMA correctas
+    df["EMA20"] = close.ewm(span=EMA_FAST, adjust=False).mean()
+    df["EMA50"] = close.ewm(span=EMA_SLOW, adjust=False).mean()
+
+    # RSI (EMA smoothing)
+    delta = close.diff()
+    up = delta.clip(lower=0)
+    down = -1 * delta.clip(upper=0)
+
+    roll_up = up.ewm(span=RSI_PERIOD, adjust=False).mean()
+    roll_down = down.ewm(span=RSI_PERIOD, adjust=False).mean()
+
+    rs = roll_up / roll_down
     df["RSI"] = 100 - (100 / (1 + rs))
 
+    df.dropna(inplace=True)
     return df
 
 def check_signals(df):
     last = df.iloc[-1]
 
-    ema20 = last["EMA20"]
-    ema50 = last["EMA50"]
-    rsi = last["RSI"]
-    price = last["Close"]
+    ema20 = float(last["EMA20"])
+    ema50 = float(last["EMA50"])
+    rsi = float(last["RSI"])
+    price = float(last["Close"])
 
     # Señal de compra
     if ema20 > ema50 and rsi > 50:
-        return f"🟢 BUY | Precio: {price:.5f} | EMA20>EMA50 | RSI {rsi:.1f}"
+        return f"🟢 BUY | {price:.5f} | EMA20>EMA50 | RSI {rsi:.1f}"
 
     # Señal de venta
     if ema20 < ema50 and rsi < 50:
-        return f"🔴 SELL | Precio: {price:.5f} | EMA20<EMA50 | RSI {rsi:.1f}"
+        return f"🔴 SELL | {price:.5f} | EMA20<EMA50 | RSI {rsi:.1f}"
 
     return None
 
@@ -64,22 +73,41 @@ def process_symbol(name, yf_symbol):
     log(f"Descargando datos de {name} ({yf_symbol})...")
 
     try:
-        df = yf.download(yf_symbol, interval=INTERVAL, period=PERIOD, progress=False)
+        df = yf.download(
+            yf_symbol,
+            interval=INTERVAL,
+            period=PERIOD,
+            progress=False,
+            auto_adjust=True  # evita warnings
+        )
     except Exception as e:
         print(f"❌ Error descargando {name}: {e}\n")
         return
 
-    # Validación mejorada
-    if df is None or df.empty or len(df) < 60:
-        print("⚠️ No hay suficientes velas.\n")
+    if df is None or df.empty:
+        print("⚠️ No hay datos descargados.\n")
+        return
+
+    if "Close" not in df.columns:
+        print("⚠️ No existe columna Close.\n")
+        return
+
+    df.dropna(inplace=True)
+    if len(df) < 60:
+        print("⚠️ No hay suficientes velas (mínimo 60).\n")
         return
 
     df = calculate_indicators(df)
 
+    # DEBUG
+    last = df.iloc[-1]
+    print(f"DEBUG {name} → Close:{last['Close']:.5f}, EMA20:{last['EMA20']:.5f}, EMA50:{last['EMA50']:.5f}, RSI:{last['RSI']:.2f}")
+
+    # Evaluar señal
     signal = check_signals(df)
 
     if signal:
-        print(f"✅ Señal encontrada en {name}: {signal}\n")
+        print(f"✅ Señal en {name}: {signal}\n")
     else:
         print("ℹ️ Sin señal.\n")
 
