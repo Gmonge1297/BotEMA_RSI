@@ -1,65 +1,78 @@
-import os
 import yfinance as yf
 import pandas as pd
 import numpy as np
 import smtplib
 from email.mime.text import MIMEText
 from datetime import datetime
+import os
 
-# -------------------------------------------------
-# Configuración
-# -------------------------------------------------
-symbols = {
+# -----------------------------
+# Configuración del BOT
+# -----------------------------
+PERIOD = "5d"
+INTERVAL = "5m"
+
+SYMBOLS = {
     "EURUSD": "EURUSD=X",
     "GBPUSD": "GBPUSD=X",
     "USDJPY": "USDJPY=X",
     "XAUUSD": "GC=F"
 }
 
-interval = "15m"
-period = "5d"
-
 EMAIL_USER = os.getenv("EMAIL_USER")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_TO = os.getenv("EMAIL_TO")
 
-# -------------------------------------------------
-# Función para enviar email
-# -------------------------------------------------
-def enviar_email(asunto, mensaje):
+# -----------------------------
+# Enviar correo
+# -----------------------------
+def send_email(subject, body):
     if not EMAIL_USER or not EMAIL_PASSWORD or not EMAIL_TO:
         print("⚠️ Credenciales email no configuradas; no se envía correo.")
         return
 
+    msg = MIMEText(body)
+    msg["Subject"] = subject
+    msg["From"] = EMAIL_USER
+    msg["To"] = EMAIL_TO
+
     try:
-        msg = MIMEText(mensaje)
-        msg["Subject"] = asunto
-        msg["From"] = EMAIL_USER
-        msg["To"] = EMAIL_TO
-
-        server = smtplib.SMTP("smtp.gmail.com", 587)
-        server.starttls()
-        server.login(EMAIL_USER, EMAIL_PASSWORD)
-        server.send_message(msg)
-        server.quit()
-
-        print(f"📧 Email enviado: {asunto}")
-
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(EMAIL_USER, EMAIL_PASSWORD)
+            server.sendmail(EMAIL_USER, EMAIL_TO, msg.as_string())
+        print(f"📧 Email enviado: {subject}")
     except Exception as e:
-        print("⚠️ Error enviando email:", e)
+        print(f"⚠️ Error enviando correo: {e}")
 
-# -------------------------------------------------
-# Lógica de estrategia (EMA20/EMA50 + RSI + vela)
-# -------------------------------------------------
-def obtener_senal(df, symbol):
-    df["EMA20"] = df["Close"].ewm(span=20).mean()
-    df["EMA50"] = df["Close"].ewm(span=50).mean()
-    df["RSI"] = calc_RSI(df["Close"])
 
-    # Última vela
+# -----------------------------
+# Calcular indicadores
+# -----------------------------
+def calcular_indicadores(df):
+    df["EMA20"] = df["Close"].ewm(span=20, adjust=False).mean()
+    df["EMA50"] = df["Close"].ewm(span=50, adjust=False).mean()
+
+    delta = df["Close"].diff()
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, abs(delta), 0)
+
+    roll_up = pd.Series(gain).rolling(14).mean()
+    roll_down = pd.Series(loss).rolling(14).mean()
+
+    rs = roll_up / roll_down
+    df["RSI"] = 100 - (100 / (1 + rs))
+
+    return df
+
+
+# -----------------------------
+# Lógica de señal original
+# -----------------------------
+def obtener_senal(df, name):
+
+    # Últimos valores (esto evita el error que tienes ahora)
     c0 = df["Close"].iloc[-1]
     o0 = df["Open"].iloc[-1]
-
     ema20 = df["EMA20"].iloc[-1]
     ema50 = df["EMA50"].iloc[-1]
     rsi = df["RSI"].iloc[-1]
@@ -74,44 +87,44 @@ def obtener_senal(df, symbol):
 
     return None, None
 
-# -------------------------------------------------
-# RSI original
-# -------------------------------------------------
-def calc_RSI(series, period=14):
-    delta = series.diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
 
-    avg_gain = gain.rolling(period).mean()
-    avg_loss = loss.rolling(period).mean()
+# -----------------------------
+# Obtener datos y procesar
+# -----------------------------
+def revisar_par(nombre, yf_symbol):
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Descargando datos de {nombre} ({yf_symbol})...")
 
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+    df = yf.download(yf_symbol, period=PERIOD, interval=INTERVAL, progress=False)
 
-# -------------------------------------------------
-# Ejecución principal
-# -------------------------------------------------
-print("=== Bot Intermedio: EMA20/EMA50 + RSI + Vela confirmatoria ===")
+    if df is None or len(df) < 60:
+        print("⚠️ Datos insuficientes.")
+        return
 
-for name, yf_symbol in symbols.items():
-    print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Descargando datos de {name} ({yf_symbol})...")
+    df = calcular_indicadores(df)
 
-    df = yf.download(yf_symbol, interval=interval, period=period, progress=False)
+    signal, price = obtener_senal(df, nombre)
 
-    signal, price = obtener_senal(df, name)
+    if signal:
+        cuerpo = f"""
+Señal confirmada — {nombre} ({signal})
+Entrada: {price:.5f}
+RSI: {df['RSI'].iloc[-1]:.1f}
+Bot: EMA20/EMA50 + RSI + vela confirmatoria
+Generado: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+"""
+        send_email(f"🔔 Señal {signal} {nombre}", cuerpo)
 
-    if signal is None:
-        print(f"— No hubo señal para {name}")
-        continue
+        print(f"Señal encontrada: {nombre} {signal} (entrada {price:.5f})")
+    else:
+        print(f"— No hubo señal para {nombre}")
 
-    # Mensaje para email
-    asunto = f"Señal {signal} {name} — EMA+RSI Confirmada"
-    mensaje = f"Se encontró señal {signal} en {name} al precio {price:.5f}"
 
-    enviar_email(asunto, mensaje)
+# -----------------------------
+# Main
+# -----------------------------
+print("=== Bot Intermedio: EMA20/EMA50 + RSI + Vela confirmatoria ===\n")
 
-    # Print EXACTO de los logs
-    print(f"\nSeñal encontrada: {name} {signal} (entrada {price:.5f})\n")
+for name, symbol in SYMBOLS.items():
+    revisar_par(name, symbol)
 
-print("=== Fin ejecución ===")
+print("\n=== Fin ejecución ===")
