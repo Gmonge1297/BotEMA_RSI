@@ -59,26 +59,25 @@ def calculate_indicators(df):
     df["EMA50"] = df["Close"].ewm(span=EMA_SLOW, adjust=False).mean()
 
     delta = df["Close"].diff()
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+
+    # ======================================================
+    # FIX: asegurar 1D para evitar ValueError de Pandas
+    # ======================================================
+    gain = np.where(delta > 0, delta, 0).flatten()
+    loss = np.where(delta < 0, -delta, 0).flatten()
 
     avg_gain = pd.Series(gain).rolling(RSI_PERIOD).mean()
     avg_loss = pd.Series(loss).rolling(RSI_PERIOD).mean()
+
     rs = avg_gain / avg_loss
     df["RSI"] = 100 - (100 / (1 + rs))
 
     return df
 
-# ==============================================================
-# NUEVO: detectar alerta para cerrar con ganancia parcial
-# ==============================================================
-
 def check_trend_reversal(df):
-    """Detecta cambio de tendencia con EMA20 vs EMA50."""
     last = df.iloc[-1]
     prev = df.iloc[-2]
 
-    # Cruce bajista o alcista de EMA20/EMA50
     if prev["EMA20"] > prev["EMA50"] and last["EMA20"] < last["EMA50"]:
         return "down"
     if prev["EMA20"] < prev["EMA50"] and last["EMA20"] > last["EMA50"]:
@@ -88,18 +87,15 @@ def check_trend_reversal(df):
 
 def check_signal(df):
     last = df.iloc[-1]
-    prev = df.iloc[-2]
 
     ema20 = last["EMA20"]
     ema50 = last["EMA50"]
     rsi = last["RSI"]
     price = last["Close"]
+    bull = last["Close"] > last["Open"]
+    bear = last["Close"] < last["Open"]
 
-    bullish_candle = last["Close"] > last["Open"]
-    bearish_candle = last["Close"] < last["Open"]
-
-    # BUY
-    if ema20 > ema50 and rsi > 50 and bullish_candle:
+    if ema20 > ema50 and rsi > 50 and bull:
         return {
             "type": "BUY",
             "price": price,
@@ -108,8 +104,7 @@ def check_signal(df):
             "rsi": rsi
         }
 
-    # SELL
-    if ema20 < ema50 and rsi < 50 and bearish_candle:
+    if ema20 < ema50 and rsi < 50 and bear:
         return {
             "type": "SELL",
             "price": price,
@@ -123,7 +118,7 @@ def check_signal(df):
 def build_email(name, signal):
     now = datetime.now(pytz.timezone("America/Costa_Rica")).strftime("%Y-%m-%d %H:%M:%S")
 
-    template = f"""
+    return f"""
 Señal confirmada — {name} ({signal['type']})
 
 Entrada: {signal['price']:.5f}
@@ -136,35 +131,26 @@ Riesgo por trade (USD aprox): 1.00
 Bot: EMA20/EMA50 + RSI (flex) + vela confirmatoria
 Generado: {now}
 """
-    return template
 
-# ==============================================================
-# NUEVO: email para cerrar con ganancia parcial
-# ==============================================================
-
-def build_partial_close_email(name, entry_price, current_price):
+def build_partial_close_email(name, entry, current):
     now = datetime.now(pytz.timezone("America/Costa_Rica")).strftime("%Y-%m-%d %H:%M:%S")
-    profit = current_price - entry_price
+    profit = current - entry
 
-    template = f"""
+    return f"""
 ⚠️ Cerrar ahora — Ganancia parcial recomendada  
-{ name }
+{name}
 
 La operación aún iba en positivo, pero se detectó un cambio de tendencia.
 
-Entrada: {entry_price:.5f}
-Precio actual: {current_price:.5f}
+Entrada: {entry:.5f}
+Precio actual: {current:.5f}
 Ganancia actual: {profit:.2f}
 
-Razón: Cruce inverso EMA20/EMA50 detectado (cambio de tendencia).
+Razón: Cruce inverso EMA20/EMA50 detectado.
 
 Generado: {now}
 """
-    return template
 
-# ==============================================================
-
-# Vamos a guardar señales activas en memoria simple
 active_trades = {}
 
 def process_symbol(name, symbol):
@@ -181,52 +167,39 @@ def process_symbol(name, symbol):
     signal = check_signal(df)
     price = df.iloc[-1]["Close"]
 
-    # --------------------------------------------
-    # 1) SI HAY NUEVA SEÑAL → REGISTRARLA
-    # --------------------------------------------
+    # 1) nueva señal
     if signal:
-        print(f"⚡ Señal encontrada en {name}\n")
-        active_trades[name] = signal  # guardar trade activo
+        active_trades[name] = signal
         email = build_email(name, signal)
         send_email(f"Señal — {name}", email)
         return
 
-    # --------------------------------------------
-    # 2) SI NO HAY NUEVA SEÑAL → REVISAR TRADES ACTIVOS
-    # --------------------------------------------
+    # 2) revisar cierres parciales
     if name in active_trades:
-
         entry = active_trades[name]["price"]
         tp = active_trades[name]["tp"]
         direction = active_trades[name]["type"]
 
-        # calcular % del TP avanzado
-        tp_distance = abs(tp - entry)
-        current_gain = abs(price - entry)
-        progress = current_gain / tp_distance
+        tp_dist = abs(tp - entry)
+        gain_now = abs(price - entry)
+        progress = gain_now / tp_dist
 
         reversal = check_trend_reversal(df)
 
-        # Si ya avanzó entre 70% y 90% del camino hacia TP
-        # y detectamos cambio de tendencia opuesto
         if progress >= 0.70:
             if (direction == "BUY" and reversal == "down") or \
                (direction == "SELL" and reversal == "up"):
 
-                print(f"⚠️ Cambio de tendencia detectado en {name}. Enviando alerta…")
-
                 email = build_partial_close_email(name, entry, price)
                 send_email(f"⚠️ Cerrar con ganancia parcial — {name}", email)
-
-                # eliminar trade de la lista
                 del active_trades[name]
                 return
 
     print("ℹ️ Sin señales nuevas.\n")
 
-# ==========================
+# ======================
 # MAIN
-# ==========================
+# ======================
 
 if __name__ == "__main__":
     print("\n=== Bot EMA+RSI (Actualizado con alerta de cierre parcial) ===\n")
