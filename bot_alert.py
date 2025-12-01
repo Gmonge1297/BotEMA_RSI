@@ -16,14 +16,14 @@ SYMBOLS = {
 }
 
 INTERVAL = "1h"     # Timeframe 1 hora
-PERIOD = "7d"       # 7 días de historial para evitar errores
+PERIOD = "7d"       # 7 días de historial
 
 EMA_FAST = 20
 EMA_SLOW = 50
 RSI_PERIOD = 14
 
 # ==========================
-# FUNCIONES DEL BOT
+# FUNCIONES
 # ==========================
 
 def log(msg):
@@ -31,24 +31,15 @@ def log(msg):
     print(f"[ {cr} ] {msg}")
 
 def calculate_indicators(df):
-    close = df["Close"]
+    df["EMA20"] = df["Close"].rolling(EMA_FAST).mean()
+    df["EMA50"] = df["Close"].rolling(EMA_SLOW).mean()
 
-    # EMA correctas
-    df["EMA20"] = close.ewm(span=EMA_FAST, adjust=False).mean()
-    df["EMA50"] = close.ewm(span=EMA_SLOW, adjust=False).mean()
-
-    # RSI (EMA smoothing)
-    delta = close.diff()
-    up = delta.clip(lower=0)
-    down = -1 * delta.clip(upper=0)
-
-    roll_up = up.ewm(span=RSI_PERIOD, adjust=False).mean()
-    roll_down = down.ewm(span=RSI_PERIOD, adjust=False).mean()
-
-    rs = roll_up / roll_down
+    delta = df["Close"].diff()
+    gain = delta.clip(lower=0).rolling(RSI_PERIOD).mean()
+    loss = (-delta.clip(upper=0)).rolling(RSI_PERIOD).mean()
+    rs = gain / loss
     df["RSI"] = 100 - (100 / (1 + rs))
 
-    df.dropna(inplace=True)
     return df
 
 def check_signals(df):
@@ -59,15 +50,18 @@ def check_signals(df):
     rsi = float(last["RSI"])
     price = float(last["Close"])
 
-    # Señal de compra
     if ema20 > ema50 and rsi > 50:
-        return f"🟢 BUY | {price:.5f} | EMA20>EMA50 | RSI {rsi:.1f}"
+        return f"🟢 BUY | Precio: {price:.5f} | EMA20>EMA50 | RSI {rsi:.1f}"
 
-    # Señal de venta
     if ema20 < ema50 and rsi < 50:
-        return f"🔴 SELL | {price:.5f} | EMA20<EMA50 | RSI {rsi:.1f}"
+        return f"🔴 SELL | Precio: {price:.5f} | EMA20<EMA50 | RSI {rsi:.1f}"
 
     return None
+
+
+# ==========================
+# PROCESAR CADA PAR
+# ==========================
 
 def process_symbol(name, yf_symbol):
     log(f"Descargando datos de {name} ({yf_symbol})...")
@@ -78,7 +72,7 @@ def process_symbol(name, yf_symbol):
             interval=INTERVAL,
             period=PERIOD,
             progress=False,
-            auto_adjust=True  # evita warnings
+            auto_adjust=True
         )
     except Exception as e:
         print(f"❌ Error descargando {name}: {e}\n")
@@ -88,26 +82,54 @@ def process_symbol(name, yf_symbol):
         print("⚠️ No hay datos descargados.\n")
         return
 
+    # Normalizar columnas (a veces yfinance devuelve MultiIndex)
+    cols = []
+    for c in df.columns:
+        if isinstance(c, tuple):
+            nc = next((x for x in c if x), c[0])
+        else:
+            nc = c
+        if nc == 'Adj Close':
+            nc = 'Close'
+        cols.append(nc)
+
+    df.columns = cols
+
     if "Close" not in df.columns:
-        print("⚠️ No existe columna Close.\n")
+        print("⚠️ La columna 'Close' no existe. Columnas recibidas:", df.columns.tolist(), "\n")
         return
 
     df.dropna(inplace=True)
+
     if len(df) < 60:
         print("⚠️ No hay suficientes velas (mínimo 60).\n")
         return
 
     df = calculate_indicators(df)
 
-    # DEBUG
-    last = df.iloc[-1]
-    print(f"DEBUG {name} → Close:{last['Close']:.5f}, EMA20:{last['EMA20']:.5f}, EMA50:{last['EMA50']:.5f}, RSI:{last['RSI']:.2f}")
+    # DEBUG → valores escalares para evitar errores de formato
+    try:
+        close_last = float(df["Close"].iat[-1])
+        ema20_last = float(df["EMA20"].iat[-1])
+        ema50_last = float(df["EMA50"].iat[-1])
+        rsi_last = float(df["RSI"].iat[-1])
 
-    # Evaluar señal
-    signal = check_signals(df)
+        print(f"DEBUG {name} → Close:{close_last:.5f}, EMA20:{ema20_last:.5f}, EMA50:{ema50_last:.5f}, RSI:{rsi_last:.2f}")
+    except Exception as e:
+        print(f"⚠️ Error obteniendo valores escalares en {name}: {e}")
+        print("Columnas:", df.columns.tolist())
+        print("Última fila:")
+        print(df.tail(1))
+        pass
+
+    try:
+        signal = check_signals(df)
+    except Exception as e:
+        print(f"❌ Error evaluando señal en {name}: {e}\n")
+        signal = None
 
     if signal:
-        print(f"✅ Señal en {name}: {signal}\n")
+        print(f"✅ Señal encontrada en {name}: {signal}\n")
     else:
         print("ℹ️ Sin señal.\n")
 
