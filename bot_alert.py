@@ -16,8 +16,7 @@ PARES = {
     "EURUSD": "EURUSD=X",
     "GBPUSD": "GBPUSD=X",
     "USDJPY": "USDJPY=X",
-    ",
-    "XAUUSD": "GC=F"           # Oro (Gold futures)
+    "XAUUSD": "GC=F"           # ← LÍNEA CORREGIDA (se borró la coma y comillas sueltas)
 }
 
 PERIOD = "60d"
@@ -29,7 +28,6 @@ EMAIL_USER = os.getenv("EMAIL_USER")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_TO = os.getenv("EMAIL_TO")
 
-# Control de señales repetidas (máximo 1 cada 4 horas por par)
 ultima_señal = {}
 
 # =========================================
@@ -56,7 +54,7 @@ def enviar_email(asunto, cuerpo):
         print(f"Error enviando email: {e}")
 
 # =========================================
-# INDICADORES (corregido y optimizado)
+# INDICADORES
 # =========================================
 def calcular_indicadores(df):
     if df.empty:
@@ -72,11 +70,10 @@ def calcular_indicadores(df):
     rs = gain / loss
     df["RSI"] = 100 - (100 / (1 + rs))
     df["RSI"] = df["RSI"].fillna(50)
-
     return df
 
 # =========================================
-# TP / SL con riesgo fijo de ~$1
+# TP / SL
 # =========================================
 def calcular_tp_sl(precio_entrada, direccion, par):
     if "JPY" in par:
@@ -86,8 +83,7 @@ def calcular_tp_sl(precio_entrada, direccion, par):
     else:
         pip_value = 0.0001
 
-    # Con lote 0.01 → ~10 USD por pip en pares normales → queremos arriesgar solo $1 → ~10 pips
-    sl_pips = max(12, round(RIESGO_MAX_DOLARES / (LOTE * 100000 * pip_value), 1))
+    sl_pips = max(12, RIESGO_MAX_DOLARES / (LOTE * 100000 * pip_value))
 
     if direccion == "BUY":
         sl = round(precio_entrada - sl_pips * pip_value, 5 if "JPY" not in par else 3)
@@ -99,28 +95,23 @@ def calcular_tp_sl(precio_entrada, direccion, par):
     return sl, tp
 
 # =========================================
-# DETECTAR CAMBIO DE TENDENCIA (para aviso de cierre)
+# CAMBIO DE TENDENCIA
 # =========================================
 def hay_cambio_tendencia(df, direccion_actual):
-    ema20_actual = df["EMA20"].iloc[-1]
-    ema50_actual = df["EMA50"].iloc[-1]
-
-    if direccion_actual == "BUY" and ema20_actual < ema50_actual:
+    if df["EMA20"].iloc[-1] < df["EMA50"].iloc[-1] and direccion_actual == "BUY":
         return True
-    if direccion_actual == "SELL" and ema20_actual > ema50_actual:
+    if df["EMA20"].iloc[-1] > df["EMA50"].iloc[-1] and direccion_actual == "SELL":
         return True
     return False
 
 # =========================================
-# GENERAR SEÑAL (todo con .iloc[-1], nunca Series en if)
+# GENERAR SEÑAL
 # =========================================
 def obtener_senal(df, par):
     if len(df) < 60:
         return None
 
-    # Últimas 3 velas cerradas
     ultimas_3 = df.iloc[-3:]
-
     close = df["Close"].iloc[-1]
     ema20 = df["EMA20"].iloc[-1]
     ema50 = df["EMA50"].iloc[-1]
@@ -130,26 +121,18 @@ def obtener_senal(df, par):
     velas_bajistas = (ultimas_3["Close"] < ultimas_3["Open"]).sum()
 
     direccion = None
-
-    # Condiciones de COMPRA
-    if (ema20 > ema50 and
-        50 < rsi < 75 and
-        velas_alcistas >= 2):
+    if ema20 > ema50 and 50 < rsi < 75 and velas_alcistas >= 2:
         direccion = "BUY"
-
-    # Condiciones de VENTA
-    elif (ema20 < ema50 and
-          25 < rsi < 50 and
-          velas_bajistas >= 2):
+    elif ema20 < ema50 and 25 < rsi < 50 and velas_bajistas >= 2:
         direccion = "SELL"
 
     if direccion is None:
         return None
 
-    # Evitar señal repetida en menos de 4 horas
+    # Anti-repetición 4 horas
     if par in ultima_señal:
-        tiempo_desde_ultima = (datetime.now() - ultima_señal[par]["time"]).total_seconds()
-        if ultima_señal[par]["direccion"] == direccion and tiempo_desde_ultima < 14400:  # 4 horas
+        if (ultima_señal[par]["direccion"] == direccion and
+            (datetime.now() - ultima_señal[par]["time"]).total_seconds() < 14400):
             return None
 
     sl, tp = calcular_tp_sl(close, direccion, par)
@@ -166,7 +149,7 @@ def obtener_senal(df, par):
     return señal
 
 # =========================================
-# BUCLE PRINCIPAL (con sleep de 1 hora al final)
+# BUCLE PRINCIPAL
 # =========================================
 print("=== BOT FOREX $50 - LOTE 0.01 - RIESGO $1 ===")
 print(f"Iniciado: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
@@ -175,15 +158,12 @@ while True:
     for nombre, ticker in PARES.items():
         try:
             print(f"Analizando {nombre}...", end=" ")
-
-            # yfinance a veces devuelve MultiIndex, lo aplanamos
             df = yf.download(ticker, period=PERIOD, interval=INTERVAL, progress=False, auto_adjust=True)
 
             if df.empty or len(df) < 60:
-                print("Sin datos suficientes")
+                print("sin datos")
                 continue
 
-            # Corregir posible MultiIndex de columnas
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.droplevel(1)
 
@@ -195,39 +175,28 @@ while True:
 SEÑAL {señal['direccion']} — {nombre}
 
 Entrada: {señal['entrada']}
-Stop Loss:  {señal['sl']}
-Take Profit: {señal['tp']}
-RSI actual: {señal['rsi']}
+SL:  {señal['sl']}
+TP:  {señal['tp']}
+RSI: {señal['rsi']}
 Lote: {LOTE}
-Riesgo ≈ $1.00 | Reward 2:1
 
-Generado el {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-Estrategia: EMA20 vs EMA50 + RSI + 2/3 velas confirmatorias
+Generado: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 """
                 enviar_email(f"SEÑAL {señal['direccion']} → {nombre}", cuerpo)
-                print("¡SEÑAL ENVIADA!")
-
+                print("SEÑAL ENVIADA")
             else:
                 print("sin señal")
-                # Aviso de posible cambio de tendencia
-                if nombre in ultima_señal:
-                    if hay_cambio_tendencia(df, ultima_señal[nombre]["direccion"]):
-                        aviso = f"""
-CAMBIO DE TENDENCIA DETECTADO EN {nombre}
 
-Tu posición {ultima_señal[nombre]['direccion']} está en riesgo.
-Recomendación: cerrar manualmente antes del SL.
-
-Hora: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-"""
-                        enviar_email(f"CIERRE RECOMENDADO – {nombre}", aviso)
-                        print("Aviso de cierre enviado")
+                if nombre in ultima_señal and hay_cambio_tendencia(df, ultima_señal[nombre]["direccion"]):
+                    enviar_email(f"CIERRE RECOMENDADO – {nombre}",
+                                 f"Cambio de tendencia detectado en {nombre}. Cierra manualmente.")
+                    print("Aviso de cierre enviado")
 
         except Exception as e:
             print(f"Error: {e}")
 
-        time.sleep(3)  # ser amables con yfinance
+        time.sleep(3)
 
-    print(f"\nAnálisis completado – {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("Próxima ejecución en 1 hora...\n" + "-"*60)
-    time.sleep(3600)  # Espera 1 hora exacta
+    print(f"\nAnálisis completado – {datetime.now()}")
+    print("Próxima ejecución en 1 hora...\n" + "—" * 60)
+    time.sleep(3600)
