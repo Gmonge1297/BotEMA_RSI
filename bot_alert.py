@@ -1,36 +1,33 @@
-import os
-import smtplib
-import pandas as pd
 import yfinance as yf
+import pandas as pd
+import numpy as np
+import smtplib
 from email.mime.text import MIMEText
 from datetime import datetime
+import os
 
-# ============================
-# CONFIGURACIÓN GENERAL
-# ============================
+# ===========================
+# CONFIGURACIÓN GLOBAL
+# ===========================
 
-PARES = {
+SYMBOLS = {
     "EURUSD": "EURUSD=X",
-    "GBPUSD": "GBPUSD=X",
-    "USDJPY": "USDJPY=X",
-    "XAUUSD": "GC=F"
 }
 
-PERIOD = "5d"
-INTERVAL = "1h"
+PERIOD = "7d"
+INTERVAL = "5m"
 
 EMAIL_USER = os.getenv("EMAIL_USER")
-EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
+EMAIL_PASS = os.getenv("EMAIL_PASS")
 EMAIL_TO = os.getenv("EMAIL_TO")
 
+# ===========================
+# FUNCIÓN: ENVIAR CORREO
+# ===========================
 
-# ============================
-# FUNCIÓN PARA ENVIAR CORREO
-# ============================
-
-def enviar_email(asunto, mensaje):
-    if not EMAIL_USER or not EMAIL_PASSWORD or not EMAIL_TO:
-        print("⚠️ Credenciales email no configuradas; no se envía correo.")
+def enviar_alerta(asunto, mensaje):
+    if not EMAIL_USER or not EMAIL_PASS or not EMAIL_TO:
+        print("❌ Variables de email no configuradas.")
         return
 
     msg = MIMEText(mensaje)
@@ -39,95 +36,87 @@ def enviar_email(asunto, mensaje):
     msg["To"] = EMAIL_TO
 
     try:
-        server = smtplib.SMTP("smtp.gmail.com", 587)
-        server.starttls()
-        server.login(EMAIL_USER, EMAIL_PASSWORD)
-        server.sendmail(EMAIL_USER, EMAIL_TO, msg.as_string())
-        server.quit()
-        print(f"📧 Email enviado: {asunto}")
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+            smtp.login(EMAIL_USER, EMAIL_PASS)
+            smtp.send_message(msg)
+        print("📧 Alerta enviada correctamente.")
     except Exception as e:
         print(f"❌ Error enviando correo: {e}")
 
 
-# ============================
-# CÁLCULO DE INDICADORES
-# ============================
-
-def calcular_indicadores(df):
-    df["EMA20"] = df["Close"].ewm(span=20).mean()
-    df["EMA50"] = df["Close"].ewm(span=50).mean()
-
-    delta = df["Close"].diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-
-    roll_up = gain.rolling(14).mean()
-    roll_down = loss.rolling(14).mean()
-
-    RS = roll_up / roll_down
-    df["RSI"] = 100 - (100 / (1 + RS))
-
-    df = df.dropna()
-    return df
-
-
-# ============================
-# REGLAS DE SEÑAL (3 velas)
-# ============================
+# ===========================
+# FUNCIÓN: OBTENER SEÑAL
+# ===========================
 
 def obtener_senal(df):
+    # Necesitamos al menos 50 velas
+    if len(df) < 50:
+        return None, None
+
+    # EMAs
+    df["EMA20"] = df["Close"].ewm(span=20, adjust=False).mean()
+    df["EMA50"] = df["Close"].ewm(span=50, adjust=False).mean()
+
+    ema20 = df["EMA20"].iloc[-1]
+    ema50 = df["EMA50"].iloc[-1]
+
+    # RSI
+    delta = df["Close"].diff()
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(14).mean().iloc[-1]
+    avg_loss = pd.Series(loss).rolling(14).mean().iloc[-1]
+    rs = avg_gain / avg_loss if avg_loss != 0 else 0
+    rsi = 100 - (100 / (1 + rs))
+
+    # Últimas 3 velas
     c0, o0 = df["Close"].iloc[-1], df["Open"].iloc[-1]
     c1, o1 = df["Close"].iloc[-2], df["Open"].iloc[-2]
     c2, o2 = df["Close"].iloc[-3], df["Open"].iloc[-3]
 
-    ema20 = df["EMA20"].iloc[-1]
-    ema50 = df["EMA50"].iloc[-1]
-    rsi = df["RSI"].iloc[-1]
-
-    # BUY: Tendencia alcista + RSI > 50 + al menos 1 de las 3 velas sea alcista
+    # Señal BUY
     if ema20 > ema50 and rsi > 50 and ((c0 > o0) or (c1 > o1) or (c2 > o2)):
-        return "BUY", c0
+        return "BUY", df["Close"].iloc[-1]
 
-    # SELL: Tendencia bajista + RSI < 50 + al menos 1 de las 3 velas sea bajista
+    # Señal SELL
     if ema20 < ema50 and rsi < 50 and ((c0 < o0) or (c1 < o1) or (c2 < o2)):
-        return "SELL", c0
+        return "SELL", df["Close"].iloc[-1]
 
     return None, None
 
 
-# ============================
-# PROCESO PARA CADA PAR
-# ============================
+# ===========================
+# FUNCIÓN: PROCESAR PAR
+# ===========================
 
 def revisar_par(nombre, symbol):
-
-    print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Descargando datos de {nombre} ({symbol})...")
-
+    print(f"\n[🔍 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Descargando datos de {nombre} ({symbol})...")
     df = yf.download(symbol, period=PERIOD, interval=INTERVAL, progress=False)
-    if df is None or df.empty:
-        print("❌ No se pudieron descargar datos.")
-        return
 
-    df = calcular_indicadores(df)
+    if df is None or df.empty:
+        print(f"❌ No se pudieron descargar datos para {nombre}.")
+        return
 
     señal, precio = obtener_senal(df)
 
     if señal:
-        asunto = f"🔥 Señal {señal} {nombre}"
-        mensaje = f"Señal detectada en {nombre}\nDirección: {señal}\nPrecio: {precio}"
-        enviar_email(asunto, mensaje)
-        print(f"➡️ Señal encontrada: {nombre} {señal} (precio {precio})")
+        mensaje = (
+            f"Par: {nombre}\n"
+            f"Señal: {señal}\n"
+            f"Precio actual: {precio}\n"
+            f"Hora: {datetime.now()}"
+        )
+        enviar_alerta(f"⚠️ Señal {señal} - {nombre}", mensaje)
+        print(f"✅ Señal detectada: {señal} @ {precio}")
     else:
-        print(f"— No hubo señal para {nombre}")
+        print("Sin señal.")
 
 
-# ============================
-# EJECUCIÓN PRINCIPAL
-# ============================
+# ===========================
+# MAIN
+# ===========================
 
-print("=== Bot Intermedio: EMA20/EMA50 + RSI + Últimas 3 velas ===")
+print("\n=== Bot Intermedio: EMA20/EMA50 + RSI + Últimas 3 velas ===")
 
-for name, symbol in PARES.items():
+for name, symbol in SYMBOLS.items():
     revisar_par(name, symbol)
-
-print("\n=== Fin ejecución ===")
