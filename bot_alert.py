@@ -7,14 +7,15 @@ import numpy as np
 import smtplib
 from email.mime.text import MIMEText
 from datetime import datetime
+import os
 
 # ==============================================
 # CONFIGURACIÓN
 # ==============================================
 
-EMAIL_FROM = "tu_correo@gmail.com"
-EMAIL_TO = "tu_correo@gmail.com"
-EMAIL_PASS = "tu_password_app"
+EMAIL_FROM = os.getenv("EMAIL_USER")
+EMAIL_TO = os.getenv("EMAIL_TO")
+EMAIL_PASS = os.getenv("EMAIL_PASSWORD")
 
 SYMBOLS = {
     "EURUSD": "EURUSD=X",
