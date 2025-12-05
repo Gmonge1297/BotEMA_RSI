@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 # ============================
 CR_TZ = pytz.timezone("America/Costa_Rica")
 
-# ENV (asegurar coincidencia con bot.yml)
+# ENV (coincidir con tus secrets en bot.yml)
 EMAIL_USER = os.getenv("EMAIL_USER")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_TO = os.getenv("EMAIL_TO")
@@ -32,7 +32,7 @@ RSI_MIN_ALLOWED = 15
 
 ADX_MIN = 20        # umbral mínimo de fuerza de tendencia
 
-# SL/TP settings (Option 1: SL 30 pips TP 30 pips; gold in USD)
+# SL/TP settings (SL/TP en pips para forex; en USD para oro)
 SL_PIPS_FOREX = 30
 TP_PIPS_FOREX = 30
 SL_USD_GOLD = 3
@@ -43,7 +43,7 @@ MAX_RISK_USD = 1.5  # riesgo por trade
 TIMEFRAME_MINUTES = 60
 MIN_ROWS = 60
 
-# Safety: no more than 1 signal per pair per this many hours
+# Safety: no más de 1 señal por par cada X horas
 SIGNAL_COOLDOWN_HOURS = 8
 
 pairs = {
@@ -53,16 +53,23 @@ pairs = {
     "XAUUSD": "GC=F"
 }
 
-# Simple in-memory cooldown store (persists while runner runs)
+# Simple in-memory cooldown store (persiste mientras el runner corre)
 last_signal_time = {}
 
+# Opcional: limitar lote máximo sugerido (None = sin límite)
+MAX_LOT_SUGGESTED = None  # ej: 0.03 para no sugerir más de 0.03
+
 # ============================
-# UTIL: robust data handling
+# UTIL: manejo y logs
 # ============================
 def now_cr():
     return datetime.now(CR_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
+def log(msg):
+    print(f"[{now_cr()}] {msg}")
+
 def to_1d(series):
+    """Convierte Series/DF 1-col a pd.Series 1D y asegura float."""
     if isinstance(series, pd.DataFrame):
         s = series.iloc[:, 0]
         return pd.Series(s).astype(float).reset_index(drop=True)
@@ -72,8 +79,11 @@ def to_1d(series):
         return pd.Series(arr).astype(float).reset_index(drop=True)
     return pd.Series(series).astype(float).reset_index(drop=True)
 
+# ============================
+# PIP / LOT sizing
+# ============================
 def pip_value(symbol):
-    # conservative approx per 0.0001 or 0.01 moves
+    # aproximación conservadora por pip (para 1 unidad de precio)
     if symbol == "GC=F":       # XAUUSD
         return 0.10
     if "JPY" in symbol:
@@ -82,21 +92,21 @@ def pip_value(symbol):
 
 def calculate_lot_for_risk(entry, sl, max_risk, symbol):
     pip = pip_value(symbol)
-    sl_pips = abs((entry - sl) / pip)
-    if sl_pips == 0:
+    sl_pips = abs((entry - sl) / pip) if pip != 0 else np.nan
+    if sl_pips == 0 or np.isnan(sl_pips) or np.isinf(sl_pips):
         return 0.01
-    # approximate value per pip for 0.01 lot
-    value_0_01 = 0.10
-    # conservative: if XAU use slightly smaller per pip value assumption
+    value_0_01 = 0.10  # valor aproximado de pip para 0.01 lot
     if symbol == "GC=F":
         value_0_01 = 0.10
     lot = max_risk / (sl_pips * value_0_01)
-    # round down to avoid overshooting risk
+    # redondear hacia abajo (no sobrepasar riesgo)
     lot = max(0.01, np.floor(lot * 100) / 100.0)
-    return lot
+    if MAX_LOT_SUGGESTED is not None:
+        lot = min(lot, MAX_LOT_SUGGESTED)
+    return float(lot)
 
 # ============================
-# INDICATORS
+# INDICADORES
 # ============================
 def ema(series, span):
     s = to_1d(series)
@@ -130,15 +140,15 @@ def adx(high, low, close, period=14):
     plus_di = 100 * (plus_dm.rolling(window=period, min_periods=period).mean() / atr.replace(0, np.nan))
     minus_di = 100 * (minus_dm.rolling(window=period, min_periods=period).mean() / atr.replace(0, np.nan))
     dx = (abs(plus_di - minus_di) / (plus_di + minus_di)).replace([np.inf, -np.inf], np.nan) * 100
-    adx = dx.rolling(window=period, min_periods=period).mean()
-    return adx.fillna(0)
+    adx_series = dx.rolling(window=period, min_periods=period).mean()
+    return adx_series.fillna(0)
 
 # ============================
 # EMAIL
 # ============================
 def send_email(subject, body):
     if not EMAIL_USER or not EMAIL_PASSWORD or not EMAIL_TO:
-        print("⚠️ Credenciales email no configuradas; no se envía correo.")
+        log("⚠️ Credenciales email no configuradas; no se envía correo.")
         return False
     try:
         msg = MIMEMultipart()
@@ -151,97 +161,142 @@ def send_email(subject, body):
         server.login(EMAIL_USER, EMAIL_PASSWORD)
         server.send_message(msg)
         server.quit()
-        print(f"📧 Email enviado: {subject}")
+        log(f"📧 Email enviado: {subject}")
         return True
     except Exception as e:
-        print("❌ Error enviando correo:", e)
+        log(f"❌ Error enviando correo: {e}")
         return False
 
 # ============================
 # FETCH data (robusto)
 # ============================
 def fetch_ohlc_yf(symbol, period_minutes=60):
+    """
+    Descarga datos de yfinance y normaliza columnas:
+    - maneja MultiIndex (p.ej. ('EURUSD=X','High'))
+    - normaliza a minúsculas
+    - remapea adj close, variaciones, y hace fallback conservador
+    """
     try:
         df = yf.download(symbol, period="7d", interval=f"{period_minutes}m", progress=False, auto_adjust=False)
         if df is None or df.empty:
             return pd.DataFrame()
-        df.columns = [str(c).lower() for c in df.columns]
-        # remap if necessary
+
+        # Si viene MultiIndex (p.ej. ('EURUSD=X','High')) -> tomar segundo nivel
+        if isinstance(df.columns, pd.MultiIndex):
+            try:
+                cols = df.columns.get_level_values(-1)
+                df.columns = [str(c).lower() for c in cols]
+            except Exception:
+                df.columns = ["_".join(map(str, c)).lower() for c in df.columns]
+        else:
+            df.columns = [str(c).lower() for c in df.columns]
+
+        # Remap close/open si hay variantes
         if "open" not in df.columns or "close" not in df.columns:
             cand_close = [c for c in df.columns if "close" in c]
             cand_open = [c for c in df.columns if "open" in c]
             if cand_close and cand_open:
-                df = df.rename(columns={cand_close[0]:"close", cand_open[0]:"open"})
-            else:
-                first = df.columns[0]
-                df = df.rename(columns={first:"close"})
-                df["open"] = df["close"]
-                df["high"] = df["close"]
-                df["low"] = df["close"]
-                df["volume"] = 0
-        # ensure numeric
-        for col in ["open","high","low","close"]:
+                df = df.rename(columns={cand_close[0]: "close", cand_open[0]: "open"})
+
+        # Sinónimo adj close
+        for candidate in ["adj close", "adj_close", "adjclose", "close_adj"]:
+            if "close" not in df.columns and candidate in df.columns:
+                df = df.rename(columns={candidate: "close"})
+
+        # heurística high/low
+        if "high" not in df.columns:
+            cand = [c for c in df.columns if "high" in c]
+            if cand:
+                df = df.rename(columns={cand[0]: "high"})
+        if "low" not in df.columns:
+            cand = [c for c in df.columns if "low" in c]
+            if cand:
+                df = df.rename(columns={cand[0]: "low"})
+
+        # Fallback conservador: si falta alguna columna, rellenar con la primera columna numérica encontrada
+        for col in ["open", "high", "low", "close"]:
+            if col not in df.columns:
+                numeric_cols = [c for c in df.columns if df[c].dtype.kind in "fi"]
+                if numeric_cols:
+                    df[col] = df[numeric_cols[0]]
+                else:
+                    df[col] = np.nan
+
+        # Asegurar numeric y colapsar DataFrame 1-col si ocurre
+        for col in ["open", "high", "low", "close"]:
             if col in df.columns:
                 if isinstance(df[col], pd.DataFrame):
-                    df[col] = df[col].iloc[:,0]
+                    df[col] = df[col].iloc[:, 0]
                 df[col] = pd.to_numeric(df[col], errors="coerce")
+
         df = df.dropna(subset=["close"])
         return df
     except Exception as e:
-        print("Error al descargar datos:", e)
+        log(f"Error al descargar datos: {e}")
         return pd.DataFrame()
 
 # ============================
 # SIGNAL logic (PRO)
 # ============================
 def analyze_pair(label, yf_symbol):
-    print(f"[{now_cr()}] Analizando {label} ({yf_symbol})")
+    log(f"Analizando {label} ({yf_symbol})")
     # cooldown
     last_t = last_signal_time.get(label)
     if last_t and datetime.now() - last_t < timedelta(hours=SIGNAL_COOLDOWN_HOURS):
-        print(f"  — Saltando {label}: cooldown activo ({SIGNAL_COOLDOWN_HOURS}h).")
+        log(f"  — Saltando {label}: cooldown activo ({SIGNAL_COOLDOWN_HOURS}h).")
         return
 
     df = fetch_ohlc_yf(yf_symbol, period_minutes=TIMEFRAME_MINUTES)
     if df.empty or len(df) < MIN_ROWS:
-        print("  — Datos insuficientes.")
+        log("  — Datos insuficientes.")
         return
 
+    # convertir a series 1D
     close = to_1d(df["close"])
     openv = to_1d(df["open"])
     high = to_1d(df["high"])
     low = to_1d(df["low"])
 
+    # indicadores
     ema_fast = ema(close, EMA_FAST)
     ema_slow = ema(close, EMA_SLOW)
     rsi_series = rsi(close, RSI_PERIOD)
     adx_series = adx(high, low, close, period=ADX_PERIOD)
 
-    # need at least ADX back values
+    # validar ADX
     if len(adx_series) < ADX_PERIOD or np.isnan(adx_series.iat[-1]):
-        print("  — ADX insuficiente, saltando.")
+        log("  — ADX insuficiente, saltando.")
         return
 
-    # scalar indicators for last candles
-    f2 = float(ema_fast.iat[-3]); s2 = float(ema_slow.iat[-3])
-    f1 = float(ema_fast.iat[-2]); s1 = float(ema_slow.iat[-2])
-    fl = float(ema_fast.iat[-1]); sl = float(ema_slow.iat[-1])
+    # valores escalares para las últimas velas
+    try:
+        f2 = float(ema_fast.iat[-3]); s2 = float(ema_slow.iat[-3])
+        f1 = float(ema_fast.iat[-2]); s1 = float(ema_slow.iat[-2])
+        fl = float(ema_fast.iat[-1]); sl = float(ema_slow.iat[-1])
+    except Exception as e:
+        log(f"  — Error al leer EMAs: {e}")
+        return
 
-    close_last = float(close.iat[-1]); open_last = float(openv.iat[-1])
-    close_prev = float(close.iat[-2]); open_prev = float(openv.iat[-2])
-    close_prev2 = float(close.iat[-3]); open_prev2 = float(openv.iat[-3])
+    try:
+        close_last = float(close.iat[-1]); open_last = float(openv.iat[-1])
+        close_prev = float(close.iat[-2]); open_prev = float(openv.iat[-2])
+        close_prev2 = float(close.iat[-3]); open_prev2 = float(openv.iat[-3])
+    except Exception as e:
+        log(f"  — Error al leer precios: {e}")
+        return
 
     rsi_last = float(rsi_series.iat[-1])
     adx_last = float(adx_series.iat[-1])
 
-    # debug concise
-    print(f"  close={close_last:.5f} EMA20={fl:.5f} EMA50={sl:.5f} RSI={rsi_last:.1f} ADX={adx_last:.1f}")
+    # debug
+    log(f"  close={close_last:.5f} EMA20={fl:.5f} EMA50={sl:.5f} RSI={rsi_last:.1f} ADX={adx_last:.1f}")
 
-    # cross detection (previous candle)
+    # detección de cruce (vela previa)
     cross_up_prev = (f2 <= s2) and (f1 > s1)
     cross_dn_prev = (f2 >= s2) and (f1 < s1)
 
-    # confirmation within last 3 candles (any of the 3)
+    # confirmación en las últimas 3 velas (cualquiera)
     buy_confirm_any = (
         ((close_last > open_last) and (close_last > fl) and (close_last > sl)) or
         ((close_prev > open_prev) and (close_prev > fl) and (close_prev > sl)) or
@@ -253,15 +308,15 @@ def analyze_pair(label, yf_symbol):
         ((close_prev2 < open_prev2) and (close_prev2 < fl) and (close_prev2 < sl))
     )
 
-    # RSI + ADX filters
+    # filtros RSI + ADX
     buy_ok = (rsi_last >= RSI_BUY_MIN) and (rsi_last <= RSI_MAX_ALLOWED) and (adx_last >= ADX_MIN)
     sell_ok = (rsi_last <= RSI_SELL_MAX) and (rsi_last >= RSI_MIN_ALLOWED) and (adx_last >= ADX_MIN)
 
-    # Final signals
+    # señales finales
     buy_signal = cross_up_prev and buy_confirm_any and buy_ok
     sell_signal = cross_dn_prev and sell_confirm_any and sell_ok
 
-    # Explain why no signal
+    # explicar por qué no hay señal
     if not (buy_signal or sell_signal):
         reasons = []
         if not (cross_up_prev or cross_dn_prev):
@@ -272,10 +327,10 @@ def analyze_pair(label, yf_symbol):
             reasons.append(f"ADX bajo ({adx_last:.1f} < {ADX_MIN})")
         if not (rsi_last >= RSI_BUY_MIN) and not (rsi_last <= RSI_SELL_MAX):
             reasons.append(f"RSI fuera de rango ({rsi_last:.1f})")
-        print("  — No signal. Razones:", "; ".join(reasons))
+        log("  — No signal. Razones: " + "; ".join(reasons))
         return
 
-    # Build outputs
+    # construir salidas (entrada, sl, tp)
     if buy_signal:
         side = "BUY"
         if yf_symbol == "GC=F":
@@ -299,6 +354,7 @@ def analyze_pair(label, yf_symbol):
             sl = entry + SL_PIPS_FOREX * pip
             tp = entry - TP_PIPS_FOREX * pip
 
+    # calcular lote sugerido
     lot = calculate_lot_for_risk(entry, sl, MAX_RISK_USD, yf_symbol)
 
     msg = (
@@ -308,19 +364,22 @@ def analyze_pair(label, yf_symbol):
         f"Bot: EMA20/EMA50 + RSI + ADX + 3-velas (PRO)\nGenerado: {now_cr()}\n"
     )
 
-    # Send email and record cooldown
+    # enviar email y registrar cooldown
     ok = send_email(f"{side} Confirmado {label}", msg)
     if ok:
         last_signal_time[label] = datetime.now()
-        print(f"  → Señal enviada: {side} {label} Entrada:{entry} SL:{sl} TP:{tp} Lote:{lot}")
+        log(f"  → Señal enviada: {side} {label} Entrada:{entry} SL:{sl} TP:{tp} Lote:{lot}")
     else:
-        print("  → Señal lista pero fallo envío de email.")
+        log("  → Señal lista pero fallo envío de email.")
 
 # ============================
 # MAIN
 # ============================
 if __name__ == "__main__":
-    print("=== Bot PRO ejecutándose (modo CRON) ===")
+    log("=== Bot PRO ejecutándose (modo CRON) ===")
     for label, symbol in pairs.items():
-        analyze_pair(label, symbol)
-    print("Fin del ciclo.")
+        try:
+            analyze_pair(label, symbol)
+        except Exception as e:
+            log(f"Error inesperado procesando {label}: {e}")
+    log("=== Fin del ciclo PRO ===")
