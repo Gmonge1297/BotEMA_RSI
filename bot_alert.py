@@ -13,7 +13,7 @@ PARES = {
     "XAUUSD": "GC=F"
 }
 
-MIN_CANDLES = 300  # para evitar errores de EMA
+MIN_CANDLES = 50  # para evitar errores de EMA
 
 # ================================
 # FUNCIÓN: DESCARGAR DATOS
