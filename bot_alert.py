@@ -168,7 +168,7 @@ def send_email(subject, body):
         return False
 
 # ============================
-# FETCH data (robusto)
+# FETCH data (robusto)  <-- CORRECCIÓN: manejo dtype cuando df[col] es DataFrame
 # ============================
 def fetch_ohlc_yf(symbol, period_minutes=60):
     """
@@ -215,11 +215,35 @@ def fetch_ohlc_yf(symbol, period_minutes=60):
                 df = df.rename(columns={cand[0]: "low"})
 
         # Fallback conservador: si falta alguna columna, rellenar con la primera columna numérica encontrada
+        def is_numeric_column(col_name):
+            """Chequea si df[col_name] (o su primera subcol) es numérica."""
+            col = df[col_name]
+            if isinstance(col, pd.DataFrame):
+                # colapse a la primera subcol
+                sub = col.iloc[:, 0]
+                return sub.dtype.kind in "fi"
+            else:
+                return col.dtype.kind in "fi"
+
         for col in ["open", "high", "low", "close"]:
             if col not in df.columns:
-                numeric_cols = [c for c in df.columns if df[c].dtype.kind in "fi"]
+                numeric_cols = []
+                # construir lista de nombres con tipo numérico (maneja columnas que sean DataFrame también)
+                for c in df.columns:
+                    try:
+                        if isinstance(df[c], pd.DataFrame):
+                            # si es DataFrame, revisar la primera subcol
+                            sub = df[c].iloc[:, 0]
+                            if sub.dtype.kind in "fi":
+                                numeric_cols.append(c)
+                        else:
+                            if df[c].dtype.kind in "fi":
+                                numeric_cols.append(c)
+                    except Exception:
+                        continue
                 if numeric_cols:
                     df[col] = df[numeric_cols[0]]
+                    log(f"  — Fallback: rellenando '{col}' desde '{numeric_cols[0]}'")
                 else:
                     df[col] = np.nan
 
