@@ -1,128 +1,178 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import datetime
-import pytz
+import smtplib
+from email.mime.text import MIMEText
+from datetime import datetime
 
-FOREX_PAIRS = {
+# ==============================================
+# CONFIGURACIÓN
+# ==============================================
+
+EMAIL_FROM = "tu_correo@gmail.com"
+EMAIL_TO = "tu_correo@gmail.com"
+EMAIL_PASS = "tu_password_app"
+
+SYMBOLS = {
     "EURUSD": "EURUSD=X",
     "GBPUSD": "GBPUSD=X",
     "USDJPY": "JPY=X",
-    "XAUUSD": "GC=F"
+    "XAUUSD": "GC=F",
 }
 
-def download_price(symbol):
-    """
-    Descarga datos y normaliza columnas,
-    incluso cuando vienen en MultiIndex.
-    """
+PERIOD = "1d"
+WINDOW_FAST = 50
+WINDOW_SLOW = 200
+
+# ==============================================
+# FUNCIÓN PARA ENVIAR CORREO
+# ==============================================
+
+def enviar_correo(asunto, mensaje):
+    msg = MIMEText(mensaje)
+    msg["Subject"] = asunto
+    msg["From"] = EMAIL_FROM
+    msg["To"] = EMAIL_TO
 
     try:
-        df = yf.download(
-            symbol,
-            period="3d",
-            interval="1h",
-            auto_adjust=True,
-            progress=False
-        )
+        server = smtplib.SMTP_SSL("smtp.gmail.com", 465)
+        server.login(EMAIL_FROM, EMAIL_PASS)
+        server.sendmail(EMAIL_FROM, EMAIL_TO, msg.as_string())
+        server.quit()
+        print("[EMAIL] Enviado correctamente.")
+    except Exception as e:
+        print("[EMAIL ERROR]:", e)
+
+# ==============================================
+# PROCESO DE CARGA Y CÁLCULO DE INDICADORES
+# ==============================================
+
+def obtener_datos(ticker):
+    try:
+        df = yf.download(ticker, period=PERIOD, interval="1h", progress=False)
 
         if df is None or df.empty:
             return None
 
-        # === DEBUG ===
-        print("\n=== DEBUG COLUMNAS ===")
-        print("Symbol:", symbol)
-        print("COLUMNAS:", df.columns)
-        print(df.head())
-        print("=====================\n")
-
-        # Detectar MultiIndex y normalizar
+        # Manejo del MultiIndex (Yahoo a veces lo devuelve así)
         if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.droplevel(1)
+            df.columns = df.columns.get_level_values(0)
 
-        # Normalizar nombres a minúsculas
-        df.columns = [c.lower() for c in df.columns]
+        # Solo dejamos las columnas necesarias
+        df = df[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
 
-        # Asegurar que las columnas necesarias existen
-        needed = ['open', 'high', 'low', 'close', 'volume']
-        if not all(col in df.columns for col in needed):
-            return None
-
-        # Filtrar solo las necesarias para evitar confusiones
-        df = df[needed].copy()
         df.dropna(inplace=True)
-
-        if df.empty:
-            return None
-
         return df
 
     except Exception as e:
-        print(f"[ERROR descarga]: {e}")
+        print(f"[ERROR descarga]: {e}\n  — Datos insuficientes.\n")
         return None
 
+# ==============================================
+# GENERAR SEÑAL
+# ==============================================
 
-def ema(series, period):
-    return series.ewm(span=period, adjust=False).mean()
+def generar_senal(df):
 
+    df["ema_fast"] = df["Close"].ewm(span=WINDOW_FAST, adjust=False).mean()
+    df["ema_slow"] = df["Close"].ewm(span=WINDOW_SLOW, adjust=False).mean()
 
-def rsi(series, period=14):
-    delta = series.diff()
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(period).mean()
-    avg_loss = pd.Series(loss).rolling(period).mean()
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
+    df.dropna(inplace=True)
+    if df.empty:
+        return None
 
+    c = df["Close"].iloc[-1]
+    ema_fast = df["ema_fast"].iloc[-1]
+    ema_prev_fast = df["ema_fast"].iloc[-2]
+    ema_slow = df["ema_slow"].iloc[-1]
+    ema_prev_slow = df["ema_slow"].iloc[-2]
 
-def analyze_pair(label, symbol):
-    print(f"[{datetime.datetime.now()}] Analizando {label} ({symbol})\n")
-
-    df = download_price(symbol)
-
-    if df is None or len(df) < 50:  # Ajustado a 50 velas
-        print("  — Datos insuficientes.\n")
-        return
-
-    # Calcular indicadores
-    df["ema_fast"] = ema(df["close"], 20)
-    df["ema_slow"] = ema(df["close"], 50)
-    df["rsi"] = rsi(df["close"], 14)
-
-    last = df.iloc[-1]
-
-    # Señales
-    signal = None
-
-    if last["ema_fast"] < last["ema_slow"] and last["rsi"] < 50:
-        signal = "SELL"
-    elif last["ema_fast"] > last["ema_slow"] and last["rsi"] > 50:
-        signal = "BUY"
-
-    if signal:
-        price = last["close"]
-
-        if signal == "BUY":
-            sl = price * 0.997
-            tp = price * 1.003
-        else:
-            sl = price * 1.003
-            tp = price * 0.997
-
-        print(f"SEÑAL {label}: {signal}")
-        print(f"  Entrada: {price}")
-        print(f"  SL: {sl}")
-        print(f"  TP: {tp}\n")
-
+    # Cruce alcista
+    if ema_prev_fast < ema_prev_slow and ema_fast > ema_slow:
+        tipo = "COMPRA"
+    # Cruce bajista
+    elif ema_prev_fast > ema_prev_slow and ema_fast < ema_slow:
+        tipo = "VENTA"
     else:
-        print(f"  — No hay señal para {label}\n")
+        return None
 
+    # StopLoss y TakeProfit
+    if tipo == "COMPRA":
+        sl = c - (df["ATR"].iloc[-1] * 1.5)
+        tp = c + (df["ATR"].iloc[-1] * 2)
+    else:
+        sl = c + (df["ATR"].iloc[-1] * 1.5)
+        tp = c - (df["ATR"].iloc[-1] * 2)
+
+    return {
+        "tipo": tipo,
+        "precio": c,
+        "sl": sl,
+        "tp": tp
+    }
+
+# ==============================================
+# CÁLCULO DE ATR
+# ==============================================
+
+def agregar_atr(df, periodo=14):
+    df["H-L"] = df["High"] - df["Low"]
+    df["H-C"] = abs(df["High"] - df["Close"].shift(1))
+    df["L-C"] = abs(df["Low"] - df["Close"].shift(1))
+    df["TR"] = df[["H-L", "H-C", "L-C"]].max(axis=1)
+    df["ATR"] = df["TR"].rolling(periodo).mean()
+    df.dropna(inplace=True)
+    return df
+
+# ==============================================
+# FORMATO CON 5 DECIMALES
+# ==============================================
+
+def f(x):
+    return f"{x:.5f}"
+
+# ==============================================
+# MAIN
+# ==============================================
+
+def main():
+    print(f"[{datetime.utcnow()}] === Bot PRO ejecutándose (modo CRON) ===\n")
+
+    mensaje_final = ""
+
+    for nombre, ticker in SYMBOLS.items():
+        print(f"Analizando {nombre} ({ticker})")
+
+        df = obtener_datos(ticker)
+        if df is None or df.empty:
+            mensaje_final += f"{nombre}: ❌ No hay datos.\n"
+            continue
+
+        df = agregar_atr(df)
+
+        senal = generar_senal(df)
+        if senal is None:
+            mensaje_final += f"{nombre}: — Sin señal por ahora.\n"
+            continue
+
+        mensaje_final += (
+            f"\n⚡ Señal en {nombre}\n"
+            f"Tipo: {senal['tipo']}\n"
+            f"Entrada: {f(senal['precio'])}\n"
+            f"Stop Loss: {f(senal['sl'])}\n"
+            f"Take Profit: {f(senal['tp'])}\n"
+        )
+
+    print("\n=== Fin del ciclo PRO ===\n")
+
+    enviar_correo("📈 Señales Forex – Bot PRO", mensaje_final if mensaje_final else "Sin señales hoy.")
+
+# ==============================================
+# EJECUCIÓN
+# ==============================================
 
 if __name__ == "__main__":
-    print(f"[{datetime.datetime.now()}] === Bot PRO ejecutándose (modo CRON) ===\n")
-
-    for label, symbol in FOREX_PAIRS.items():
-        analyze_pair(label, symbol)
-
-    print(f"[{datetime.datetime.now()}] === Fin del ciclo PRO ===\n")
+    main()
