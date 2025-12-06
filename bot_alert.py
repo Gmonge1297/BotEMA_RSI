@@ -1,16 +1,17 @@
-# bot_alert.py  ← Versión FINAL que ya funciona con Polygon gratuito
+# bot_alert.py → VERSIÓN FINAL 100% FUNCIONAL (EURUSD + GBPUSD + XAUUSD)
 import os
 import pandas as pd
 import numpy as np
 import pytz
 import smtplib
+import time
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
-from polygon import RESTClient   # ← ahora sí es el paquete correcto
+from polygon import RESTClient
 
 # ============================
-# CONFIG
+# CONFIGURACIÓN
 # ============================
 EMAIL_USER = os.getenv("EMAIL_USER")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
@@ -27,18 +28,19 @@ ATR_PERIOD = 14
 SL_ATR_MULT = 1.5
 TP_ATR_MULT = 2.8
 
-MAX_RISK_USD = 1.5
-
-# Pares y símbolos correctos para Polygon gratuito
-pairs = {
-    "EURUSD": "C:EURUSD",
-    "GBPUSD": "C:GBPUSD",
-    "USDJPY": "C:USDJPY",
-    "XAUUSD": "C:XAUUSD"   # En XM aparece como GOLD, pero aquí es XAUUSD
-}
+MAX_RISK_USD = 1.5   # Perfecto para cuenta de $50
 
 # ============================
-# UTILS + INDICADORES (sin cambios)
+# PARES QUE QUERÉS
+# ============================
+pares_preferidos = [
+    ("EURUSD", "C:EURUSD"),
+    ("GBPUSD", "C:GBPUSD"),
+    ("XAUUSD", "C:XAUUSD")   # ← Esto es GOLD en XM
+]
+
+# ============================
+# UTILIDADES E INDICADORES
 # ============================
 def to_1d(s):
     if isinstance(s, pd.DataFrame): s = s.iloc[:, 0]
@@ -69,17 +71,16 @@ def pip_value(symbol):
     return 0.0001
 
 def lot_size(entry, sl, symbol):
-    risk = MAX_RISK_USD
     pips = abs(entry - sl) / pip_value(symbol)
-    if pips == 0: return 0.01
-    lot = risk / (pips * 1)   # 1 USD por pip ≈ 0.01 lot en la mayoría
+    if pips <= 0: return 0.01
+    lot = MAX_RISK_USD / (pips * 1.0)   # 1 USD ≈ 0.01 lot en la mayoría
     return max(round(lot, 2), 0.01)
 
 # ============================
-# ENVÍO EMAIL
+# ENVÍO DE EMAIL
 # ============================
 def send_email(subject, body):
-    if not all([EMAIL_USER, EMAIL_PASSWORD, EMAIL_TO]): 
+    if not all([EMAIL_USER, EMAIL_PASSWORD, EMAIL_TO]):
         print("Email no configurado")
         return
     try:
@@ -93,33 +94,34 @@ def send_email(subject, body):
         server.login(EMAIL_USER, EMAIL_PASSWORD)
         server.send_message(msg)
         server.quit()
-        print("Email enviado")
+        print("EMAIL ENVIADO")
     except Exception as e:
         print("Error email:", e)
 
 # ============================
-# DATOS POLYGON (CORREGIDO para cuenta gratuita)
+# DATOS POLYGON (cuenta gratuita)
 # ============================
-def get_data(symbol, timeframe, days=10):
+def get_data(symbol, timeframe, days=12):
     if not POLYGON_API_KEY:
-        print("No hay POLYGON_API_KEY")
+        print("Falta POLYGON_API_KEY")
         return pd.DataFrame()
     client = RESTClient(POLYGON_API_KEY)
-    to_date   = datetime.now()
+    to_date = datetime.now()
     from_date = to_date - timedelta(days=days)
     try:
         aggs = client.get_aggs(
             ticker=symbol,
             multiplier=1,
-            timespan=timeframe,        # "minute", "hour", "day", "4" (para H4)
+            timespan=timeframe,      # "hour" o "day"
             from_=from_date.date(),
             to=to_date.date(),
             limit=50000
         )
         df = pd.DataFrame(aggs)
+        if df.empty: return pd.DataFrame()
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         df.set_index('timestamp', inplace=True)
-        return df[['open','high','low','close']]
+        return df[['open', 'high', 'low', 'close']]
     except Exception as e:
         print("Error Polygon:", e)
         return pd.DataFrame()
@@ -128,12 +130,12 @@ def get_data(symbol, timeframe, days=10):
 # LÓGICA DE SEÑALES
 # ============================
 def analyze(label, symbol):
-    print(f"\nAnalizando {label}...")
+    print(f"\n→ Analizando {label}...")
     df1 = get_data(symbol, "hour", days=12)      # H1
-    df4 = get_data(symbol, "day", days=60)       # Daily para filtro tendencia (más simple que H4)
+    df4 = get_data(symbol, "day", days=70)       # Daily para filtro
 
-    if df1.empty or len(df1)<100 or df4.empty:
-        print("Sin datos")
+    if df1.empty or len(df1) < 100 or df4.empty:
+        print("  Sin datos suficientes")
         return
 
     close = df1['close']
@@ -152,15 +154,17 @@ def analyze(label, symbol):
     trend_up   = ema50_d.iloc[-1] > ema200_d.iloc[-1]
     trend_down = ema50_d.iloc[-1] < ema200_d.iloc[-1]
 
-    # Últimos valores
-    c0, c1 = close.iloc[-1], close.iloc[-2]
-    o0, o1 = open_.iloc[-1], open_.iloc[-2]
-    e8_0, e8_1 = ema8.iloc[-1], ema8.iloc[-2]
-    e21_0, e21_1 = ema21.iloc[-1], ema21.iloc[-2]
+    # Valores actuales
+    c0 = close.iloc[-1]
+    o0 = open_.iloc[-1]
+    e8_0  = ema8.iloc[-1]
+    e8_1  = ema8.iloc[-2]
+    e21_0 = ema21.iloc[-1]
+    e21_1 = ema21.iloc[-2]
     rsi_now = rsi_v.iloc[-1]
     atr_now = atr_v.iloc[-1]
 
-    # Pullback + cruce reciente + confirmación
+    # SEÑALES
     buy_setup  = (e8_1 <= e21_1) and (e8_0 > e21_0) and (c0 > o0) and (c0 > e21_0) and (rsi_now > RSI_BUY) and trend_up
     sell_setup = (e8_1 >= e21_1) and (e8_0 < e21_0) and (c0 < o0) and (c0 < e21_0) and (rsi_now < RSI_SELL) and trend_down
 
@@ -173,21 +177,26 @@ def analyze(label, symbol):
         tp = entry + tp_dist if buy_setup else entry - tp_dist
         lot = lot_size(entry, sl, symbol)
 
-        msg = f"""⚡ {direction} {label}
+        msg = f"""SEÑAL {direction} {label}
+
 Entrada: {entry:.5f}
 SL: {sl:.5f}
 TP: {tp:.5f}
-Lote sugerido: {lot}
+Lote: {lot}
 RSI: {rsi_now:.1f}
-Trend Daily: {"UP" if trend_up else "DOWN"}"""
+Tendencia Daily: {'ALCISTA' if trend_up else 'BAJISTA'}"""
+
         send_email(f"{direction} {label}", msg)
         print("SEÑAL ENVIADA")
 
 # ============================
-# MAIN
+# MAIN – 3 pares con espera segura
 # ============================
 if __name__ == "__main__":
-    print("=== Bot Forex EMA8-21 + RSI corriendo ===")
-    for label, sym in pairs.items():
-        analyze(label, sym)
-    print("Ciclo terminado")
+    print("=== Bot Forex EMA8-21 + RSI (EURUSD · GBPUSD · GOLD) ===")
+    for i, (label, symbol) in enumerate(pares_preferidos):
+        analyze(label, symbol)
+        if i < len(pares_preferidos) - 1:
+            print("   Esperando 20 segundos antes del siguiente par...")
+            time.sleep(20)
+    print("\nCiclo terminado – próximo en 1 hora. ¡A ganar!")
