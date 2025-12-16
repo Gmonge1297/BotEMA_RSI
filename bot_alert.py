@@ -1,4 +1,4 @@
-# bot_alert.py → VERSIÓN 100% ESTABLE: 3 pares cada hora sin 429
+# bot_alert.py → VERSIÓN AJUSTADA: Más sensible para pullbacks en tendencias (captura rallies como oro/EURUSD)
 import os
 import pandas as pd
 import numpy as np
@@ -9,9 +9,7 @@ from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
 from polygon import RESTClient
 
-# ============================
 # CONFIG
-# ============================
 EMAIL_USER = os.getenv("EMAIL_USER")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_TO = os.getenv("EMAIL_TO")
@@ -20,25 +18,20 @@ POLYGON_API_KEY = os.getenv("POLYGON_API_KEY")
 EMA_FAST = 8
 EMA_SLOW = 21
 RSI_PERIOD = 14
-RSI_BUY = 55
-RSI_SELL = 45
+RSI_BUY = 53   # Más sensible
+RSI_SELL = 47
 ATR_PERIOD = 14
 SL_ATR_MULT = 1.5
 TP_ATR_MULT = 2.8
 MAX_RISK_USD = 1.5
 
-# ============================
-# TUS 3 PARES FAVORITOS
-# ============================
 PARES = [
     ("EURUSD", "C:EURUSD"),
     ("GBPUSD", "C:GBPUSD"),
-    ("XAUUSD", "C:XAUUSD")   # ← GOLD en XM
+    ("XAUUSD", "C:XAUUSD")
 ]
 
-# ============================
-# (indicadores, email, get_data → igual que antes)
-# ============================
+# UTILIDADES (igual)
 def to_1d(s):
     if isinstance(s, pd.DataFrame): s = s.iloc[:, 0]
     return pd.Series(s).astype(float).reset_index(drop=True)
@@ -119,9 +112,9 @@ def get_data(symbol, timeframe, days=12):
 
 def analyze(label, symbol):
     print(f"\n→ Analizando {label}...")
-    df1 = get_data(symbol, "hour", days=12)
-    time.sleep(2)  # Pequeña pausa extra por si acaso
-    df4 = get_data(symbol, "day", days=70)
+    df1 = get_data(symbol, "hour", days=15)  # Más datos para mejor detección
+    time.sleep(2)
+    df4 = get_data(symbol, "day", days=80)
 
     if df1.empty or len(df1) < 100 or df4.empty:
         print("  Sin datos suficientes")
@@ -145,14 +138,19 @@ def analyze(label, symbol):
     c0 = close.iloc[-1]
     o0 = open_.iloc[-1]
     e8_0  = ema8.iloc[-1]
-    e8_1  = ema8.iloc[-2]
     e21_0 = ema21.iloc[-1]
-    e21_1 = ema21.iloc[-2]
     rsi_now = rsi_v.iloc[-1]
     atr_now = atr_v.iloc[-1]
 
-    buy_setup  = (e8_1 <= e21_1) and (e8_0 > e21_0) and (c0 > o0) and (c0 > e21_0) and (rsi_now > RSI_BUY) and trend_up
-    sell_setup = (e8_1 >= e21_1) and (e8_0 < e21_0) and (c0 < o0) and (c0 < e21_0) and (rsi_now < RSI_SELL) and trend_down
+    # AJUSTE NUEVO: Más sensible para pullbacks en tendencia establecida
+    buy_setup  = (
+        (c0 > o0) and (c0 > e21_0) and (close.iloc[-2] <= e21_0) and  # Pullback previo + vela fuerte actual
+        (e8_0 > e21_0) and (rsi_now > RSI_BUY) and trend_up
+    )
+    sell_setup = (
+        (c0 < o0) and (c0 < e21_0) and (close.iloc[-2] >= e21_0) and
+        (e8_0 < e21_0) and (rsi_now < RSI_SELL) and trend_down
+    )
 
     if buy_setup or sell_setup:
         direction = "BUY" if buy_setup else "SELL"
@@ -175,16 +173,14 @@ Tendencia: {'ALCISTA' if trend_up else 'BAJISTA'}"""
         send_email(f"{direction} {label}", msg)
         print("SEÑAL ENVIADA")
 
-# ============================
-# MAIN → LOS 3 PARES CADA HORA (con espera segura)
-# ============================
+# MAIN
 if __name__ == "__main__":
-    print(f"=== Bot activo – 3 pares cada hora ({datetime.now().strftime('%H:%M')}) ===")
+    print(f"=== Bot ajustado – más sensible para pullbacks ({datetime.now().strftime('%H:%M')}) ===")
     
     for i, (label, symbol) in enumerate(PARES):
         analyze(label, symbol)
-        if i < 2:  # espera solo entre pares (no después del último)
-            print(f"   Esperando 25 segundos antes del siguiente par...")
+        if i < 2:
+            print(f"   Esperando 25 segundos...")
             time.sleep(25)
     
-    print("\nCiclo terminado – próximo chequeo en 1 hora. ¡A ganar!")
+    print("\nCiclo terminado – ¡más señales en camino!")
