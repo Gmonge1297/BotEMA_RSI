@@ -1,4 +1,4 @@
-# bot_alert.py → VERSIÓN FINAL: Ajustes para riesgo bajo en oro + más sensible
+# bot_alert.py → VERSIÓN DEFINITIVA: 3 pares con espera larga + retry (adiós 429)
 import os
 import pandas as pd
 import numpy as np
@@ -21,18 +21,18 @@ RSI_PERIOD = 14
 RSI_BUY = 53
 RSI_SELL = 47
 ATR_PERIOD = 14
-SL_ATR_MULT = 1.2  # Más apretado
+SL_ATR_MULT = 1.2
 TP_ATR_MULT = 2.5
 
-MAX_RISK_USD = 5.0  # Riesgo máximo $5 (ajustable)
+MAX_RISK_USD = 5.0
 
 PARES = [
     ("EURUSD", "C:EURUSD"),
     ("GBPUSD", "C:GBPUSD"),
-    ("XAUUSD", "C:XAUUSD")
+    ("XAUUSD", "C:XAUUSD")   # Volvió oro
 ]
 
-# UTILIDADES
+# UTILIDADES (igual)
 def to_1d(s):
     if isinstance(s, pd.DataFrame): s = s.iloc[:, 0]
     return pd.Series(s).astype(float).reset_index(drop=True)
@@ -57,18 +57,17 @@ def atr(high, low, close, period=14):
     return tr.rolling(window=period).mean()
 
 def pip_value(symbol):
-    if "XAUUSD" in symbol: return 1.0  # Oro: $1 por punto con lote 0.01
-    if "JPY" in symbol: return 0.01
+    if "XAUUSD" in symbol: return 1.0
     return 0.0001
 
 def lot_size(entry, sl, symbol):
     dist = abs(entry - sl)
     if dist <= 0: return 0.01
-    value_per_point = pip_value(symbol) * 100  # Aprox para lote base
+    value_per_point = pip_value(symbol) * 100
     lot = MAX_RISK_USD / (dist * value_per_point / 0.01)
     lot = max(round(lot, 2), 0.01)
     if "XAUUSD" in symbol:
-        lot = min(lot, 0.02)  # Máximo 0.02 en oro para riesgo controlado
+        lot = min(lot, 0.02)  # Máximo 0.02 en oro
     return lot
 
 def send_email(subject, body):
@@ -90,35 +89,39 @@ def send_email(subject, body):
     except Exception as e:
         print("Error email:", e)
 
-def get_data(symbol, timeframe, days=15):
+def get_data(symbol, timeframe, days=15, retries=3):
     if not POLYGON_API_KEY:
         print("Falta POLYGON_API_KEY")
         return pd.DataFrame()
     client = RESTClient(POLYGON_API_KEY)
     to_date = datetime.now()
     from_date = to_date - timedelta(days=days)
-    try:
-        aggs = client.get_aggs(
-            ticker=symbol,
-            multiplier=1,
-            timespan=timeframe,
-            from_=from_date.date(),
-            to=to_date.date(),
-            limit=50000
-        )
-        df = pd.DataFrame(aggs)
-        if df.empty: return pd.DataFrame()
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        df.set_index('timestamp', inplace=True)
-        return df[['open', 'high', 'low', 'close']]
-    except Exception as e:
-        print("Error Polygon:", e)
-        return pd.DataFrame()
+    for attempt in range(retries):
+        try:
+            aggs = client.get_aggs(
+                ticker=symbol,
+                multiplier=1,
+                timespan=timeframe,
+                from_=from_date.date(),
+                to=to_date.date(),
+                limit=50000
+            )
+            df = pd.DataFrame(aggs)
+            if df.empty: return pd.DataFrame()
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            df.set_index('timestamp', inplace=True)
+            return df[['open', 'high', 'low', 'close']]
+        except Exception as e:
+            print(f"Error Polygon intento {attempt+1}: {e}")
+            if attempt < retries - 1:
+                time.sleep(30)  # Espera 30 seg antes de retry
+            else:
+                return pd.DataFrame()
 
 def analyze(label, symbol):
     print(f"\n→ Analizando {label}...")
     df1 = get_data(symbol, "hour", days=15)
-    time.sleep(2)
+    time.sleep(3)
     df4 = get_data(symbol, "day", days=80)
 
     if df1.empty or len(df1) < 100 or df4.empty:
@@ -147,7 +150,6 @@ def analyze(label, symbol):
     rsi_now = rsi_v.iloc[-1]
     atr_now = atr_v.iloc[-1]
 
-    # Pullback sensible en tendencia
     buy_setup  = (
         (c0 > o0) and (c0 > e21_0) and (close.iloc[-2] <= e21_0) and
         (e8_0 > e21_0) and (rsi_now > RSI_BUY) and trend_up
@@ -166,7 +168,7 @@ def analyze(label, symbol):
         tp = entry + tp_dist if buy_setup else entry - tp_dist
         lot = lot_size(entry, sl, symbol)
 
-        aviso_oro = "\n⚠️ ORO: Riesgo alto con lote 0.01. Considera cierre manual en +$5–$10." if "XAUUSD" in symbol else ""
+        aviso_oro = "\n⚠️ ORO: Lote mínimo 0.01 = riesgo alto. Considera cierre manual en +$5–$10 o no operar." if "XAUUSD" in symbol else ""
 
         msg = f"""SEÑAL {direction} {label}
 
@@ -180,14 +182,14 @@ Tendencia: {'ALCISTA' if trend_up else 'BAJISTA'}{aviso_oro}"""
         send_email(f"{direction} {label}", msg)
         print("SEÑAL ENVIADA")
 
-# MAIN
+# MAIN - 3 pares con espera larga
 if __name__ == "__main__":
-    print(f"=== Bot final – riesgo controlado ({datetime.now().strftime('%H:%M')}) ===")
+    print(f"=== Bot con 3 pares – espera larga anti-429 ({datetime.now().strftime('%H:%M')}) ===")
     
     for i, (label, symbol) in enumerate(PARES):
         analyze(label, symbol)
-        if i < 2:
-            print(f"   Esperando 25 segundos...")
-            time.sleep(25)
+        if i < len(PARES) - 1:
+            print(f"   Esperando 40 segundos antes del siguiente par...")
+            time.sleep(40)  # Espera larga = adiós 429
     
     print("\nCiclo terminado – señales seguras en camino!")
