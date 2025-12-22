@@ -1,36 +1,35 @@
-name: Bot Forex EMA-RSI
+name: Forex Bot M15 Scheduler
 
 on:
   schedule:
-    # Corre cada hora en punto (puedes cambiarlo si quieres cada 30 min, cada 4 horas, etc.)
-    - cron: '0 * * * *'
-  workflow_dispatch:   # Permite ejecutarlo manualmente con un botón
+    - cron: '*/15 * * * *'   # cada 15 minutos
+  workflow_dispatch:        # permite correrlo manual
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout del repositorio
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Configurar Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.11'
 
-      - name: Instalar dependencias necesarias
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install polygon-api-client pandas numpy pytz
+          pip install -r requirements.txt
 
-      - name: Ejecutar el bot
+      - name: Esperar cierre M15
+        run: sleep 45
+
+      - name: Run trading bot
+        run: python bot_alert.py
         env:
           POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
-        run: python bot_alert.py
-
-      - name: Fin del proceso
-        run: echo "Bot finalizado - $(date)"
