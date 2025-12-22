@@ -23,9 +23,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Esperar cierre M15
-        run: sleep 45
-
       - name: Run trading bot
         run: python bot_alert.py
         env:
