@@ -1,4 +1,4 @@
-# bot_alert_hybrid_ultimate.py
+# bot_alert_ema20_50_rsi.py
 import os
 import pandas as pd
 import numpy as np
@@ -16,49 +16,45 @@ EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_TO = os.getenv("EMAIL_TO")
 POLYGON_API_KEY = os.getenv("POLYGON_API_KEY")
 
-EMA_FAST = 50
-EMA_SLOW = 200
+EMA_FAST = 20
+EMA_SLOW = 50
+RSI_PERIOD = 14
 
-ATR_PERIOD = 14
-SL_ATR_MULT = 1.2
-TP_ATR_MULT = 2.5
+SL_PIPS = 30
+TP_PIPS = 30
+MAX_RISK_USD = 1.50
 
-MAX_RISK_USD = 5.0
-MIN_LOT = 0.01
-MAX_LOT = 0.50
-
-MAX_ENTRY_DEVIATION_PIPS = 5      # 🔒 ejecutabilidad real
-SIGNAL_COOLDOWN_MINUTES = 90      # 🔒 no repetir señales
-
-STATE_FILE = "signal_state.json"
+COOLDOWN_HOURS = 2
+STATE_FILE = "ema_state.json"
 
 PARES = [
     ("EURUSD", "C:EURUSD"),
     ("GBPUSD", "C:GBPUSD"),
-    ("XAUUSD", "C:XAUUSD")
+    ("USDJPY", "C:USDJPY"),
 ]
 
 # ================= UTILIDADES =================
+def pip_size(symbol):
+    if "JPY" in symbol:
+        return 0.01
+    if "XAUUSD" in symbol:
+        return 0.1
+    return 0.0001
+
 def to_1d(s):
-    if isinstance(s, pd.DataFrame):
-        s = s.iloc[:, 0]
     return pd.Series(s).astype(float).reset_index(drop=True)
 
 def ema(series, span):
     return to_1d(series).ewm(span=span, adjust=False).mean()
 
-def atr(high, low, close, period):
-    tr = pd.concat([
-        to_1d(high) - to_1d(low),
-        abs(to_1d(high) - to_1d(close).shift()),
-        abs(to_1d(low) - to_1d(close).shift())
-    ], axis=1).max(axis=1)
-    return tr.rolling(window=period).mean()
+def rsi(series, period):
+    delta = series.diff()
+    gain = delta.where(delta > 0, 0).rolling(period).mean()
+    loss = -delta.where(delta < 0, 0).rolling(period).mean()
+    rs = gain / loss.replace(0, np.nan)
+    return 100 - (100 / (1 + rs))
 
-def pip_size(symbol):
-    return 0.01 if "XAUUSD" in symbol else 0.0001
-
-# ================= ESTADO (ANTI-REPETICIÓN) =================
+# ================= ESTADO =================
 def load_state():
     if not os.path.exists(STATE_FILE):
         return {}
@@ -73,20 +69,17 @@ def save_state(state):
 def lot_size(entry, sl, symbol):
     pip_sz = pip_size(symbol)
     stop_pips = abs(entry - sl) / pip_sz
-    if stop_pips <= 0:
-        return MIN_LOT
 
-    pip_value_per_lot = 1.0 if "XAUUSD" in symbol else 10.0
-    lot = MAX_RISK_USD / (stop_pips * pip_value_per_lot)
+    if "JPY" in symbol:
+        pip_value = 9.0
+    else:
+        pip_value = 10.0
 
-    lot = round(lot, 2)
-    return min(max(lot, MIN_LOT), MAX_LOT)
+    lot = MAX_RISK_USD / (stop_pips * pip_value)
+    return max(round(lot, 2), 0.01)
 
 # ================= EMAIL =================
 def send_email(subject, body):
-    if not all([EMAIL_USER, EMAIL_PASSWORD, EMAIL_TO]):
-        print("Email no configurado")
-        return
     msg = MIMEMultipart()
     msg["From"] = EMAIL_USER
     msg["To"] = EMAIL_TO
@@ -100,7 +93,7 @@ def send_email(subject, body):
     print("EMAIL ENVIADO")
 
 # ================= DATOS =================
-def get_data(symbol, timeframe, days):
+def get_h1(symbol, days=20):
     client = RESTClient(POLYGON_API_KEY)
     to_date = datetime.now(timezone.utc)
     from_date = to_date - timedelta(days=days)
@@ -108,115 +101,96 @@ def get_data(symbol, timeframe, days):
     aggs = client.get_aggs(
         ticker=symbol,
         multiplier=1,
-        timespan=timeframe,
+        timespan="hour",
         from_=from_date.date(),
         to=to_date.date(),
         limit=50000
     )
+
     df = pd.DataFrame(aggs)
-    if df.empty:
-        return df
     df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
     df.set_index("timestamp", inplace=True)
     return df[["open", "high", "low", "close"]]
 
-# ================= LÓGICA PRINCIPAL =================
+# ================= LÓGICA =================
 def analyze(label, symbol, state):
     print(f"\n→ Analizando {label}...")
 
     now = datetime.now(timezone.utc)
-
-    # ----- cooldown -----
-    last_time = state.get(label)
-    if last_time:
-        last_time = datetime.fromisoformat(last_time)
-        if (now - last_time).total_seconds() < SIGNAL_COOLDOWN_MINUTES * 60:
-            print("  ⏸️ En cooldown")
-            return
-
-    df_h1 = get_data(symbol, "hour", 20)
-    df_m15 = get_data(symbol, "minute", 7)
-
-    if df_h1.empty or df_m15.empty:
+    last = state.get(label)
+    if last and (now - datetime.fromisoformat(last)).total_seconds() < COOLDOWN_HOURS * 3600:
+        print("  ⏸️ Cooldown activo")
         return
 
-    h1 = df_h1.iloc[-1]
-    m15 = df_m15.iloc[-1]
-
-    ema50  = ema(df_h1["close"], EMA_FAST)
-    ema200 = ema(df_h1["close"], EMA_SLOW)
-    atr_v  = atr(df_h1["high"], df_h1["low"], df_h1["close"], ATR_PERIOD)
-
-    trend_up   = ema50.iloc[-1] > ema200.iloc[-1]
-    trend_down = ema50.iloc[-1] < ema200.iloc[-1]
-
-    atr_now = atr_v.iloc[-1]
-
-    pullback_buy  = trend_up   and abs(h1["close"] - ema50.iloc[-1]) <= atr_now * 0.4
-    pullback_sell = trend_down and abs(h1["close"] - ema50.iloc[-1]) <= atr_now * 0.4
-
-    if not (pullback_buy or pullback_sell):
+    df = get_h1(symbol)
+    if len(df) < 60:
         return
 
-    confirm_buy  = pullback_buy  and m15["close"] > m15["open"]
-    confirm_sell = pullback_sell and m15["close"] < m15["open"]
+    close = df["close"]
+    open_ = df["open"]
 
-    if not (confirm_buy or confirm_sell):
+    ema20 = ema(close, EMA_FAST)
+    ema50 = ema(close, EMA_SLOW)
+    rsi_v = rsi(close, RSI_PERIOD)
+
+    # vela actual y previa
+    c0, o0 = close.iloc[-1], open_.iloc[-1]
+    c1 = close.iloc[-2]
+
+    buy = (
+        ema20.iloc[-2] <= ema50.iloc[-2] and
+        ema20.iloc[-1] > ema50.iloc[-1] and
+        rsi_v.iloc[-1] > 50 and
+        c0 > o0 and
+        c0 <= max(close.iloc[-5:-1])  # no ruptura
+    )
+
+    sell = (
+        ema20.iloc[-2] >= ema50.iloc[-2] and
+        ema20.iloc[-1] < ema50.iloc[-1] and
+        rsi_v.iloc[-1] < 50 and
+        c0 < o0 and
+        c0 >= min(close.iloc[-5:-1])
+    )
+
+    if not (buy or sell):
         return
 
-    direction = "BUY" if confirm_buy else "SELL"
+    direction = "BUY" if buy else "SELL"
+    entry = c0
 
-    # 🔑 PRECIO REAL (última M15)
-    entry = m15["close"]
-
-    # ----- validación FINAL de ejecutabilidad -----
-    current_price = m15["close"]
-    deviation_pips = abs(current_price - entry) / pip_size(symbol)
-
-    if deviation_pips > MAX_ENTRY_DEVIATION_PIPS:
-        print("  🚫 Precio ya no ejecutable")
-        return
-
-    # ----- SL / TP -----
-    sl_dist = max(atr_now * SL_ATR_MULT, 10 if "XAUUSD" in symbol else 0.0010)
-    tp_dist = atr_now * TP_ATR_MULT
-
-    sl = entry - sl_dist if direction == "BUY" else entry + sl_dist
-    tp = entry + tp_dist if direction == "BUY" else entry - tp_dist
+    pip_sz = pip_size(symbol)
+    sl = entry - SL_PIPS * pip_sz if buy else entry + SL_PIPS * pip_sz
+    tp = entry + TP_PIPS * pip_sz if buy else entry - TP_PIPS * pip_sz
 
     lot = lot_size(entry, sl, symbol)
 
-    # ----- ENVIAR SEÑAL -----
     msg = f"""SEÑAL {direction} {label}
 
-⚠️ SEÑAL EJECUTABLE – SISTEMA CERRADO
+Estrategia: EMA 20/50 + RSI
+Timeframe: H1
 
-Estrategia: Pullback EMA 50/200
-Modo: HÍBRIDO (H1 + confirmación M15)
-
-ENTRADA (market): {entry:.5f}
+Entrada (market): {entry:.5f}
 SL: {sl:.5f}
 TP: {tp:.5f}
 Lote: {lot}
 
 Regla:
-Si recibes esta señal, ejecuta sin pensar.
-Si no llegó señal, no había trade.
+Cruce confirmado + RSI filtrado.
+Si llega esta señal, se ejecuta.
 """
 
-    send_email(f"{direction} {label} – EJECUTAR", msg)
-
+    send_email(f"{direction} {label}", msg)
     state[label] = now.isoformat()
     save_state(state)
 
 # ================= MAIN =================
 if __name__ == "__main__":
-    print(f"=== BOT DEFINITIVO CERRADO ({datetime.now().strftime('%H:%M')}) ===")
-
+    print(f"=== BOT EMA 20/50 + RSI ({datetime.now().strftime('%H:%M')}) ===")
     state = load_state()
 
     for label, symbol in PARES:
         analyze(label, symbol, state)
         time.sleep(20)
 
-    print("\nCiclo terminado – sistema blindado 🔒")
+    print("\nCiclo terminado 🚀")
