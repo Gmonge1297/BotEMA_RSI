@@ -1,4 +1,4 @@
-# bot_alert_pullback.py
+# bot_alert_pullback_safe.py
 import os
 import pandas as pd
 import numpy as np
@@ -23,6 +23,8 @@ SL_ATR_MULT = 1.2
 TP_ATR_MULT = 2.5
 
 MAX_RISK_USD = 5.0
+MAX_LOT = 0.50      # 🔒 seguridad
+MIN_LOT = 0.01
 
 PARES = [
     ("EURUSD", "C:EURUSD"),
@@ -47,54 +49,79 @@ def atr(high, low, close, period):
     ], axis=1).max(axis=1)
     return tr.rolling(window=period).mean()
 
-def pip_value(symbol):
-    if "XAUUSD" in symbol:
-        return 1.0
-    return 0.0001
-
+# ================= LOTAJE CORRECTO =================
 def lot_size(entry, sl, symbol):
-    dist = abs(entry - sl)
-    if dist <= 0:
-        return 0.01
-    value_per_point = pip_value(symbol) * 100
-    lot = MAX_RISK_USD / (dist * value_per_point / 0.01)
-    lot = max(round(lot, 2), 0.01)
-    if "XAUUSD" in symbol:
-        lot = min(lot, 0.02)
+    """
+    Lotaje correcto para Forex Spot
+    1 lote = $10 por pip (EURUSD, GBPUSD)
+    """
+    risk_usd = MAX_RISK_USD
+
+    # Tamaño de pip
+    pip_size = 0.01 if "XAUUSD" in symbol else 0.0001
+
+    stop_pips = abs(entry - sl) / pip_size
+    if stop_pips <= 0:
+        return MIN_LOT
+
+    # Valor por pip
+    pip_value_per_lot = 1.0 if "XAUUSD" in symbol else 10.0
+
+    lot = risk_usd / (stop_pips * pip_value_per_lot)
+    lot = round(lot, 2)
+
+    # 🔒 límites de seguridad
+    lot = max(lot, MIN_LOT)
+    lot = min(lot, MAX_LOT)
+
     return lot
 
+# ================= EMAIL =================
 def send_email(subject, body):
     if not all([EMAIL_USER, EMAIL_PASSWORD, EMAIL_TO]):
+        print("Email no configurado")
         return
-    msg = MIMEMultipart()
-    msg["From"] = EMAIL_USER
-    msg["To"] = EMAIL_TO
-    msg["Subject"] = subject
-    msg.attach(MIMEText(body, "plain"))
-    server = smtplib.SMTP("smtp.gmail.com", 587)
-    server.starttls()
-    server.login(EMAIL_USER, EMAIL_PASSWORD)
-    server.send_message(msg)
-    server.quit()
+    try:
+        msg = MIMEMultipart()
+        msg["From"] = EMAIL_USER
+        msg["To"] = EMAIL_TO
+        msg["Subject"] = subject
+        msg.attach(MIMEText(body, "plain"))
+        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server.starttls()
+        server.login(EMAIL_USER, EMAIL_PASSWORD)
+        server.send_message(msg)
+        server.quit()
+        print("EMAIL ENVIADO")
+    except Exception as e:
+        print("Error email:", e)
 
-def get_data(symbol, timeframe, days):
+# ================= DATOS =================
+def get_data(symbol, timeframe, days, retries=3):
     client = RESTClient(POLYGON_API_KEY)
     to_date = datetime.now()
     from_date = to_date - timedelta(days=days)
-    aggs = client.get_aggs(
-        ticker=symbol,
-        multiplier=1,
-        timespan=timeframe,
-        from_=from_date.date(),
-        to=to_date.date(),
-        limit=50000
-    )
-    df = pd.DataFrame(aggs)
-    if df.empty:
-        return df
-    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
-    df.set_index("timestamp", inplace=True)
-    return df[["open", "high", "low", "close"]]
+
+    for attempt in range(retries):
+        try:
+            aggs = client.get_aggs(
+                ticker=symbol,
+                multiplier=1,
+                timespan=timeframe,
+                from_=from_date.date(),
+                to=to_date.date(),
+                limit=50000
+            )
+            df = pd.DataFrame(aggs)
+            if df.empty:
+                return df
+            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+            df.set_index("timestamp", inplace=True)
+            return df[["open", "high", "low", "close"]]
+        except Exception as e:
+            print(f"Error Polygon intento {attempt+1}: {e}")
+            time.sleep(30)
+    return pd.DataFrame()
 
 # ================= LÓGICA PRINCIPAL =================
 def analyze(label, symbol):
@@ -105,6 +132,7 @@ def analyze(label, symbol):
     df_m15 = get_data(symbol, "minute", 7)
 
     if df_h1.empty or df_m15.empty:
+        print("  Sin datos suficientes")
         return
 
     close_h1 = df_h1["close"]
@@ -121,7 +149,7 @@ def analyze(label, symbol):
     price = close_h1.iloc[-1]
     atr_now = atr_v.iloc[-1]
 
-    # -------- Pullback a EMA 50 --------
+    # -------- Pullback EMA 50 --------
     pullback_buy  = trend_up   and abs(price - ema50.iloc[-1]) <= atr_now * 0.4
     pullback_sell = trend_down and abs(price - ema50.iloc[-1]) <= atr_now * 0.4
 
@@ -132,27 +160,20 @@ def analyze(label, symbol):
     close_m15 = df_m15["close"]
     open_m15  = df_m15["open"]
 
-    last = -1
-    prev = -2
-
-    confirm_buy = (
-        pullback_buy and
-        close_m15.iloc[last] > open_m15.iloc[last] and
-        close_m15.iloc[last] > close_m15.iloc[prev]
-    )
-
-    confirm_sell = (
-        pullback_sell and
-        close_m15.iloc[last] < open_m15.iloc[last] and
-        close_m15.iloc[last] < close_m15.iloc[prev]
-    )
+    confirm_buy = pullback_buy and close_m15.iloc[-1] > open_m15.iloc[-1]
+    confirm_sell = pullback_sell and close_m15.iloc[-1] < open_m15.iloc[-1]
 
     if not (confirm_buy or confirm_sell):
         return
 
     direction = "BUY" if confirm_buy else "SELL"
 
-    sl_dist = max(atr_now * SL_ATR_MULT, 10 if "XAUUSD" in symbol else 0.0010)
+    # -------- SL / TP --------
+    sl_dist = max(
+        atr_now * SL_ATR_MULT,
+        10 if "XAUUSD" in symbol else 0.0010
+    )
+
     tp_dist = atr_now * TP_ATR_MULT
 
     entry = price
@@ -161,6 +182,11 @@ def analyze(label, symbol):
 
     lot = lot_size(entry, sl, symbol)
 
+    # 🔒 bloqueo final de seguridad
+    if lot > MAX_LOT or lot < MIN_LOT:
+        print("🚨 Lote fuera de rango. Señal bloqueada.")
+        return
+
     msg = f"""SEÑAL {direction} {label}
 
 Estrategia: Pullback EMA 50/200 + M15
@@ -168,6 +194,7 @@ Entrada: {entry:.5f}
 SL: {sl:.5f}
 TP: {tp:.5f}
 Lote: {lot}
+
 Tendencia: {'ALCISTA' if trend_up else 'BAJISTA'}
 """
 
@@ -176,8 +203,11 @@ Tendencia: {'ALCISTA' if trend_up else 'BAJISTA'}
 
 # ================= MAIN =================
 if __name__ == "__main__":
-    print(f"=== Bot Pullback EMA 50/200 ({datetime.now().strftime('%H:%M')}) ===")
+    print(f"=== Bot Pullback EMA 50/200 SEGURO ({datetime.now().strftime('%H:%M')}) ===")
+
     for i, (label, symbol) in enumerate(PARES):
         analyze(label, symbol)
         if i < len(PARES) - 1:
             time.sleep(40)
+
+    print("\nCiclo terminado – señales filtradas y seguras ✅")
