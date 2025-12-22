@@ -1,4 +1,4 @@
-# bot_alert_hybrid.py
+# bot_alert_hybrid_final.py
 import os
 import pandas as pd
 import numpy as np
@@ -26,7 +26,7 @@ MAX_RISK_USD = 5.0
 MIN_LOT = 0.01
 MAX_LOT = 0.50
 
-MAX_ENTRY_DEVIATION_PIPS = 5  # no perseguir precio
+MAX_ENTRY_DEVIATION_PIPS = 5  # seguridad final
 
 PARES = [
     ("EURUSD", "C:EURUSD"),
@@ -122,18 +122,17 @@ def get_data(symbol, timeframe, days, retries=3):
 def analyze(label, symbol):
     print(f"\n→ Analizando {label}...")
 
-    # H1 = estructura
+    # -------- H1 estructura --------
     df_h1 = get_data(symbol, "hour", 20)
     time.sleep(2)
 
-    # M15 = confirmación
+    # -------- M15 confirmación --------
     df_m15 = get_data(symbol, "minute", 7)
 
     if df_h1.empty or df_m15.empty:
         print("  Sin datos suficientes")
         return
 
-    # Últimas velas cerradas
     h1 = df_h1.iloc[-1]
     m15 = df_m15.iloc[-1]
 
@@ -148,17 +147,16 @@ def analyze(label, symbol):
     trend_up   = ema50.iloc[-1] > ema200.iloc[-1]
     trend_down = ema50.iloc[-1] < ema200.iloc[-1]
 
-    price = h1["close"]
     atr_now = atr_v.iloc[-1]
 
-    # -------- Pullback H1 --------
-    pullback_buy  = trend_up   and abs(price - ema50.iloc[-1]) <= atr_now * 0.4
-    pullback_sell = trend_down and abs(price - ema50.iloc[-1]) <= atr_now * 0.4
+    # -------- Pullback en H1 --------
+    pullback_buy  = trend_up   and abs(h1["close"] - ema50.iloc[-1]) <= atr_now * 0.4
+    pullback_sell = trend_down and abs(h1["close"] - ema50.iloc[-1]) <= atr_now * 0.4
 
     if not (pullback_buy or pullback_sell):
         return
 
-    # -------- Confirmación M15 (última cerrada) --------
+    # -------- Confirmación M15 --------
     confirm_buy  = pullback_buy  and m15["close"] > m15["open"]
     confirm_sell = pullback_sell and m15["close"] < m15["open"]
 
@@ -166,6 +164,9 @@ def analyze(label, symbol):
         return
 
     direction = "BUY" if confirm_buy else "SELL"
+
+    # ================= ENTRADA REAL =================
+    entry = m15["close"]  # 🔑 PRECIO ACTUAL REAL
 
     # -------- SL / TP --------
     sl_dist = max(
@@ -175,16 +176,15 @@ def analyze(label, symbol):
 
     tp_dist = atr_now * TP_ATR_MULT
 
-    entry = price
     sl = entry - sl_dist if direction == "BUY" else entry + sl_dist
     tp = entry + tp_dist if direction == "BUY" else entry - tp_dist
 
-    # -------- VALIDACIÓN EJECUTABLE --------
+    # -------- Validación final --------
     pip_sz = pip_size(symbol)
-    deviation_pips = abs(price - entry) / pip_sz
+    deviation_pips = abs(entry - m15["close"]) / pip_sz
 
     if deviation_pips > MAX_ENTRY_DEVIATION_PIPS:
-        print("  🚫 Señal descartada: precio ya se movió")
+        print("  🚫 Precio ya no ejecutable")
         return
 
     lot = lot_size(entry, sl, symbol)
@@ -194,18 +194,19 @@ def analyze(label, symbol):
     # -------- SEÑAL FINAL --------
     msg = f"""SEÑAL {direction} {label}
 
-⚠️ SEÑAL EJECUTABLE – MODO HÍBRIDO
+⚠️ SEÑAL EJECUTABLE – ENTRAR SIN DUDAR
 
 Estrategia: Pullback EMA 50/200
-Timeframes: H1 + confirmación M15
+Modo: HÍBRIDO (H1 + confirmación M15)
 
-Entrada: {entry:.5f}
+ENTRADA (precio actual): {entry:.5f}
 SL: {sl:.5f}
 TP: {tp:.5f}
 Lote: {lot}
 
 Regla del sistema:
-Si recibes esta señal, es porque es operable ahora mismo.
+Si recibes esta señal, entras a market.
+No calcules. No ajustes. Ejecuta.
 """
 
     send_email(f"{direction} {label} – ENTRAR", msg)
@@ -213,10 +214,10 @@ Si recibes esta señal, es porque es operable ahora mismo.
 
 # ================= MAIN =================
 if __name__ == "__main__":
-    print(f"=== BOT HÍBRIDO DEFINITIVO ({datetime.now().strftime('%H:%M')}) ===")
+    print(f"=== BOT HÍBRIDO FINAL – ENTRADA REAL ({datetime.now().strftime('%H:%M')}) ===")
 
     for label, symbol in PARES:
         analyze(label, symbol)
         time.sleep(30)
 
-    print("\nCiclo terminado – modo híbrido activo 🚀")
+    print("\nCiclo terminado – sistema cerrado 🚀")
