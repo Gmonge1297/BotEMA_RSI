@@ -1,4 +1,4 @@
-# bot_alert_pullback_final.py
+# bot_alert_hybrid.py
 import os
 import pandas as pd
 import numpy as np
@@ -26,8 +26,7 @@ MAX_RISK_USD = 5.0
 MIN_LOT = 0.01
 MAX_LOT = 0.50
 
-MAX_ENTRY_DEVIATION_PIPS = 5   # 🔒 no perseguir precio
-M15_CLOSE_TOLERANCE_SEC = 120  # 🔒 solo vela M15 recién cerrada
+MAX_ENTRY_DEVIATION_PIPS = 5  # no perseguir precio
 
 PARES = [
     ("EURUSD", "C:EURUSD"),
@@ -55,7 +54,7 @@ def atr(high, low, close, period):
 def pip_size(symbol):
     return 0.01 if "XAUUSD" in symbol else 0.0001
 
-# ================= LOTAJE CORRECTO =================
+# ================= LOTAJE =================
 def lot_size(entry, sl, symbol):
     pip_sz = pip_size(symbol)
     stop_pips = abs(entry - sl) / pip_sz
@@ -123,21 +122,20 @@ def get_data(symbol, timeframe, days, retries=3):
 def analyze(label, symbol):
     print(f"\n→ Analizando {label}...")
 
+    # H1 = estructura
     df_h1 = get_data(symbol, "hour", 20)
     time.sleep(2)
+
+    # M15 = confirmación
     df_m15 = get_data(symbol, "minute", 7)
 
     if df_h1.empty or df_m15.empty:
         print("  Sin datos suficientes")
         return
 
-    # -------- SOLO CIERRE RECIENTE M15 --------
-    last_m15_time = df_m15.index[-1]
-    now = datetime.now(timezone.utc)
-
-    if (now - last_m15_time).total_seconds() > M15_CLOSE_TOLERANCE_SEC:
-        print("  ⏳ No es cierre reciente de M15")
-        return
+    # Últimas velas cerradas
+    h1 = df_h1.iloc[-1]
+    m15 = df_m15.iloc[-1]
 
     close_h1 = df_h1["close"]
     high_h1  = df_h1["high"]
@@ -150,22 +148,19 @@ def analyze(label, symbol):
     trend_up   = ema50.iloc[-1] > ema200.iloc[-1]
     trend_down = ema50.iloc[-1] < ema200.iloc[-1]
 
-    price = close_h1.iloc[-1]
+    price = h1["close"]
     atr_now = atr_v.iloc[-1]
 
-    # -------- Pullback EMA 50 --------
+    # -------- Pullback H1 --------
     pullback_buy  = trend_up   and abs(price - ema50.iloc[-1]) <= atr_now * 0.4
     pullback_sell = trend_down and abs(price - ema50.iloc[-1]) <= atr_now * 0.4
 
     if not (pullback_buy or pullback_sell):
         return
 
-    # -------- Confirmación M15 --------
-    close_m15 = df_m15["close"]
-    open_m15  = df_m15["open"]
-
-    confirm_buy  = pullback_buy  and close_m15.iloc[-1] > open_m15.iloc[-1]
-    confirm_sell = pullback_sell and close_m15.iloc[-1] < open_m15.iloc[-1]
+    # -------- Confirmación M15 (última cerrada) --------
+    confirm_buy  = pullback_buy  and m15["close"] > m15["open"]
+    confirm_sell = pullback_sell and m15["close"] < m15["open"]
 
     if not (confirm_buy or confirm_sell):
         return
@@ -184,7 +179,7 @@ def analyze(label, symbol):
     sl = entry - sl_dist if direction == "BUY" else entry + sl_dist
     tp = entry + tp_dist if direction == "BUY" else entry - tp_dist
 
-    # -------- VALIDACIÓN DISTANCIA EJECUTABLE --------
+    # -------- VALIDACIÓN EJECUTABLE --------
     pip_sz = pip_size(symbol)
     deviation_pips = abs(price - entry) / pip_sz
 
@@ -193,17 +188,17 @@ def analyze(label, symbol):
         return
 
     lot = lot_size(entry, sl, symbol)
-
     if lot < MIN_LOT or lot > MAX_LOT:
-        print("  🚫 Lote fuera de rango")
         return
 
     # -------- SEÑAL FINAL --------
     msg = f"""SEÑAL {direction} {label}
 
-⚠️ SEÑAL EJECUTABLE – ENTRAR SIN DUDAR
+⚠️ SEÑAL EJECUTABLE – MODO HÍBRIDO
 
-Estrategia: Pullback EMA 50/200 + M15
+Estrategia: Pullback EMA 50/200
+Timeframes: H1 + confirmación M15
+
 Entrada: {entry:.5f}
 SL: {sl:.5f}
 TP: {tp:.5f}
@@ -218,11 +213,10 @@ Si recibes esta señal, es porque es operable ahora mismo.
 
 # ================= MAIN =================
 if __name__ == "__main__":
-    print(f"=== BOT DEFINITIVO SIN DUDAS ({datetime.now().strftime('%H:%M')}) ===")
+    print(f"=== BOT HÍBRIDO DEFINITIVO ({datetime.now().strftime('%H:%M')}) ===")
 
-    for i, (label, symbol) in enumerate(PARES):
+    for label, symbol in PARES:
         analyze(label, symbol)
-        if i < len(PARES) - 1:
-            time.sleep(40)
+        time.sleep(30)
 
-    print("\nCiclo terminado – solo señales ejecutables 🚀")
+    print("\nCiclo terminado – modo híbrido activo 🚀")
