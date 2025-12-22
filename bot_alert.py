@@ -1,4 +1,4 @@
-# bot_alert_pullback_safe.py
+# bot_alert_pullback_final.py
 import os
 import pandas as pd
 import numpy as np
@@ -6,7 +6,7 @@ import smtplib
 import time
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from polygon import RESTClient
 
 # ================= CONFIG =================
@@ -23,8 +23,11 @@ SL_ATR_MULT = 1.2
 TP_ATR_MULT = 2.5
 
 MAX_RISK_USD = 5.0
-MAX_LOT = 0.50      # 🔒 seguridad
 MIN_LOT = 0.01
+MAX_LOT = 0.50
+
+MAX_ENTRY_DEVIATION_PIPS = 5   # 🔒 no perseguir precio
+M15_CLOSE_TOLERANCE_SEC = 120  # 🔒 solo vela M15 recién cerrada
 
 PARES = [
     ("EURUSD", "C:EURUSD"),
@@ -49,28 +52,21 @@ def atr(high, low, close, period):
     ], axis=1).max(axis=1)
     return tr.rolling(window=period).mean()
 
+def pip_size(symbol):
+    return 0.01 if "XAUUSD" in symbol else 0.0001
+
 # ================= LOTAJE CORRECTO =================
 def lot_size(entry, sl, symbol):
-    """
-    Lotaje correcto para Forex Spot
-    1 lote = $10 por pip (EURUSD, GBPUSD)
-    """
-    risk_usd = MAX_RISK_USD
+    pip_sz = pip_size(symbol)
+    stop_pips = abs(entry - sl) / pip_sz
 
-    # Tamaño de pip
-    pip_size = 0.01 if "XAUUSD" in symbol else 0.0001
-
-    stop_pips = abs(entry - sl) / pip_size
     if stop_pips <= 0:
         return MIN_LOT
 
-    # Valor por pip
     pip_value_per_lot = 1.0 if "XAUUSD" in symbol else 10.0
+    lot = MAX_RISK_USD / (stop_pips * pip_value_per_lot)
 
-    lot = risk_usd / (stop_pips * pip_value_per_lot)
     lot = round(lot, 2)
-
-    # 🔒 límites de seguridad
     lot = max(lot, MIN_LOT)
     lot = min(lot, MAX_LOT)
 
@@ -99,7 +95,7 @@ def send_email(subject, body):
 # ================= DATOS =================
 def get_data(symbol, timeframe, days, retries=3):
     client = RESTClient(POLYGON_API_KEY)
-    to_date = datetime.now()
+    to_date = datetime.now(timezone.utc)
     from_date = to_date - timedelta(days=days)
 
     for attempt in range(retries):
@@ -115,7 +111,7 @@ def get_data(symbol, timeframe, days, retries=3):
             df = pd.DataFrame(aggs)
             if df.empty:
                 return df
-            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
             df.set_index("timestamp", inplace=True)
             return df[["open", "high", "low", "close"]]
         except Exception as e:
@@ -128,11 +124,19 @@ def analyze(label, symbol):
     print(f"\n→ Analizando {label}...")
 
     df_h1 = get_data(symbol, "hour", 20)
-    time.sleep(3)
+    time.sleep(2)
     df_m15 = get_data(symbol, "minute", 7)
 
     if df_h1.empty or df_m15.empty:
         print("  Sin datos suficientes")
+        return
+
+    # -------- SOLO CIERRE RECIENTE M15 --------
+    last_m15_time = df_m15.index[-1]
+    now = datetime.now(timezone.utc)
+
+    if (now - last_m15_time).total_seconds() > M15_CLOSE_TOLERANCE_SEC:
+        print("  ⏳ No es cierre reciente de M15")
         return
 
     close_h1 = df_h1["close"]
@@ -160,7 +164,7 @@ def analyze(label, symbol):
     close_m15 = df_m15["close"]
     open_m15  = df_m15["open"]
 
-    confirm_buy = pullback_buy and close_m15.iloc[-1] > open_m15.iloc[-1]
+    confirm_buy  = pullback_buy  and close_m15.iloc[-1] > open_m15.iloc[-1]
     confirm_sell = pullback_sell and close_m15.iloc[-1] < open_m15.iloc[-1]
 
     if not (confirm_buy or confirm_sell):
@@ -180,14 +184,24 @@ def analyze(label, symbol):
     sl = entry - sl_dist if direction == "BUY" else entry + sl_dist
     tp = entry + tp_dist if direction == "BUY" else entry - tp_dist
 
-    lot = lot_size(entry, sl, symbol)
+    # -------- VALIDACIÓN DISTANCIA EJECUTABLE --------
+    pip_sz = pip_size(symbol)
+    deviation_pips = abs(price - entry) / pip_sz
 
-    # 🔒 bloqueo final de seguridad
-    if lot > MAX_LOT or lot < MIN_LOT:
-        print("🚨 Lote fuera de rango. Señal bloqueada.")
+    if deviation_pips > MAX_ENTRY_DEVIATION_PIPS:
+        print("  🚫 Señal descartada: precio ya se movió")
         return
 
+    lot = lot_size(entry, sl, symbol)
+
+    if lot < MIN_LOT or lot > MAX_LOT:
+        print("  🚫 Lote fuera de rango")
+        return
+
+    # -------- SEÑAL FINAL --------
     msg = f"""SEÑAL {direction} {label}
+
+⚠️ SEÑAL EJECUTABLE – ENTRAR SIN DUDAR
 
 Estrategia: Pullback EMA 50/200 + M15
 Entrada: {entry:.5f}
@@ -195,19 +209,20 @@ SL: {sl:.5f}
 TP: {tp:.5f}
 Lote: {lot}
 
-Tendencia: {'ALCISTA' if trend_up else 'BAJISTA'}
+Regla del sistema:
+Si recibes esta señal, es porque es operable ahora mismo.
 """
 
-    send_email(f"{direction} {label}", msg)
-    print("SEÑAL ENVIADA")
+    send_email(f"{direction} {label} – ENTRAR", msg)
+    print("✅ SEÑAL EJECUTABLE ENVIADA")
 
 # ================= MAIN =================
 if __name__ == "__main__":
-    print(f"=== Bot Pullback EMA 50/200 SEGURO ({datetime.now().strftime('%H:%M')}) ===")
+    print(f"=== BOT DEFINITIVO SIN DUDAS ({datetime.now().strftime('%H:%M')}) ===")
 
     for i, (label, symbol) in enumerate(PARES):
         analyze(label, symbol)
         if i < len(PARES) - 1:
             time.sleep(40)
 
-    print("\nCiclo terminado – señales filtradas y seguras ✅")
+    print("\nCiclo terminado – solo señales ejecutables 🚀")
