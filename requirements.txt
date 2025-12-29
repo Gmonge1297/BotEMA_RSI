@@ -3,3 +3,4 @@ numpy
 yfinance
 python-dotenv
 polygon-api-client
+pandas_ta
