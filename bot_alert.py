@@ -1,4 +1,4 @@
-# bot_alert_ema20_50_rsi_v2.py
+# bot_alert_ema20_50_rsi_full.py
 import os
 import json
 import time
@@ -6,7 +6,10 @@ from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import numpy as np
-from polygon import RESTClient  # Asegúrate de tener instalado polygon-api-client
+from polygon import RESTClient
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 # ================= CONFIGURACIÓN =================
 EMA_FAST = 20
@@ -20,10 +23,19 @@ MAX_RISK_USD = 1.50
 COOLDOWN_HOURS = 1
 STATE_FILE = "ema_state.json"
 
+EMAIL_USER = os.getenv("EMAIL_USER")
+EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
+EMAIL_TO = os.getenv("EMAIL_TO")
+POLYGON_API_KEY = os.getenv("POLYGON_API_KEY")
+
 PARES = [
     ("EURUSD", "C:EURUSD"),
     ("GBPUSD", "C:GBPUSD"),
     ("USDJPY", "C:USDJPY"),
+    ("AUDUSD", "C:AUDUSD"),
+    ("NZDUSD", "C:NZDUSD"),
+    ("USDCAD", "C:USDCAD"),
+    ("XAUUSD", "C:XAUUSD"),  # Oro
 ]
 
 # ================= UTILIDADES =================
@@ -34,14 +46,10 @@ def pip_size(symbol: str) -> float:
         return 0.1
     return 0.0001
 
-def to_1d(s):
-    return pd.Series(s).astype(float).reset_index(drop=True)
-
 def ema(series, span):
-    return to_1d(series).ewm(span=span, adjust=False).mean()
+    return pd.Series(series).astype(float).ewm(span=span, adjust=False).mean()
 
 def rsi(series, period=14):
-    """RSI casero mejorado para evitar NaN y divisiones por cero."""
     delta = series.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -49,7 +57,7 @@ def rsi(series, period=14):
     avg_loss = loss.rolling(period).mean()
     rs = avg_gain / avg_loss.replace(0, np.nan)
     rsi = 100 - (100 / (1 + rs))
-    return rsi.fillna(50)  # valores iniciales neutros
+    return rsi.fillna(50)
 
 # ================= ESTADO =================
 def load_state():
@@ -70,14 +78,30 @@ def lot_size(entry: float, sl: float, symbol: str) -> float:
     pip_sz = pip_size(symbol)
     stop_pips = abs(entry - sl) / pip_sz
     pip_value = 10.0 if "JPY" not in symbol else 9.0
+    if "XAUUSD" in symbol:
+        pip_value = 1.0  # oro: pip value distinto
     if stop_pips <= 0:
         return 0.01
     lot = MAX_RISK_USD / (stop_pips * pip_value)
     return max(round(lot, 2), 0.01)
 
+# ================= EMAIL =================
+def send_email(subject, body):
+    msg = MIMEMultipart()
+    msg["From"] = EMAIL_USER
+    msg["To"] = EMAIL_TO
+    msg["Subject"] = subject
+    msg.attach(MIMEText(body, "plain"))
+    server = smtplib.SMTP("smtp.gmail.com", 587)
+    server.starttls()
+    server.login(EMAIL_USER, EMAIL_PASSWORD)
+    server.send_message(msg)
+    server.quit()
+    print("📧 Email enviado")
+
 # ================= DATOS =================
 def get_h1(symbol: str, days: int = 30) -> pd.DataFrame:
-    client = RESTClient(os.getenv("POLYGON_API_KEY"))
+    client = RESTClient(POLYGON_API_KEY)
     to_date = datetime.now(timezone.utc)
     from_date = to_date - timedelta(days=days)
 
@@ -126,7 +150,6 @@ def analyze(label: str, symbol: str, state: dict):
     ema50 = ema(close, EMA_SLOW)
     rsi_v = rsi(close, RSI_PERIOD)
 
-    # Usar vela cerrada previa
     c0, o0 = close.iloc[-2], open_.iloc[-2]
 
     print(
@@ -137,14 +160,14 @@ def analyze(label: str, symbol: str, state: dict):
     buy = (
         ema20.iloc[-3] <= ema50.iloc[-3]
         and ema20.iloc[-2] > ema50.iloc[-2]
-        and rsi_v.iloc[-2] >= 52
+        and rsi_v.iloc[-2] >= 50
         and c0 > o0
     )
 
     sell = (
         ema20.iloc[-3] >= ema50.iloc[-3]
         and ema20.iloc[-2] < ema50.iloc[-2]
-        and rsi_v.iloc[-2] <= 48
+        and rsi_v.iloc[-2] <= 50
         and c0 < o0
     )
 
@@ -159,10 +182,21 @@ def analyze(label: str, symbol: str, state: dict):
     tp = entry + TP_PIPS * pip_sz if buy else entry - TP_PIPS * pip_sz
     lot = lot_size(entry, sl, symbol)
 
-    print(f"\n✅ SEÑAL {direction} {label}")
-    print(f"  Entrada: {entry:.5f} | SL: {sl:.5f} | TP: {tp:.5f}")
-    print(f"  Lote sugerido: {lot}\n")
+    # Ajuste especial para oro
+    mt5_symbol = "GOLD" if "XAUUSD" in symbol else label
 
+    msg = f"""✅ SEÑAL {direction} {label} (MT5: {mt5_symbol})
+
+Estrategia: EMA {EMA_FAST}/{EMA_SLOW} + RSI {RSI_PERIOD}
+Timeframe: H1 (vela cerrada)
+
+Entrada: {entry:.5f}
+SL: {sl:.5f}
+TP: {tp:.5f}
+Lote sugerido: {lot}
+"""
+
+    send_email(f"{direction} {label}", msg)
     state[label] = now.isoformat()
     save_state(state)
 
