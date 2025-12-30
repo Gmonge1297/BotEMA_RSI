@@ -3,20 +3,27 @@ import numpy as np
 from datetime import datetime, timedelta, timezone
 from polygon import RESTClient
 import os
+import time
 
 # ================= CONFIGURACIÓN =================
 POLYGON_API_KEY = os.getenv("POLYGON_API_KEY")
 
-# Lista de pares a analizar
-PARES = [
+# Lista de pares divididos en dos grupos para evitar rate limit
+GRUPO_1 = [
     ("EURUSD", "C:EURUSD"),
     ("GBPUSD", "C:GBPUSD"),
     ("USDJPY", "C:USDJPY"),
     ("AUDUSD", "C:AUDUSD"),
+]
+
+GRUPO_2 = [
     ("NZDUSD", "C:NZDUSD"),
     ("USDCAD", "C:USDCAD"),
     ("XAUUSD", "C:XAUUSD"),
 ]
+
+# Número de días de histórico a usar (ajustable)
+DIAS = 5
 
 # ================= FUNCIONES =================
 def ema(series, span):
@@ -32,7 +39,7 @@ def rsi(series, period=14):
     rsi = 100 - (100 / (1 + rs))
     return rsi.fillna(50)
 
-def get_h1(symbol: str, days: int = 10) -> pd.DataFrame:
+def get_h1(symbol: str, days: int = DIAS) -> pd.DataFrame:
     client = RESTClient(POLYGON_API_KEY)
     to_date = datetime.now(timezone.utc)
     from_date = to_date - timedelta(days=days)
@@ -54,12 +61,10 @@ def get_h1(symbol: str, days: int = 10) -> pd.DataFrame:
     df = df.rename(columns=col_map)
     return df[["open", "high", "low", "close"]].dropna()
 
-# ================= BACKTEST =================
-if __name__ == "__main__":
-    print("=== BACKTEST EMA20/50 + RSI (H1) ===")
-    for label, symbol in PARES:
+def backtest_group(group):
+    for label, symbol in group:
         try:
-            df = get_h1(symbol, days=10)  # últimos 10 días (~240 velas H1)
+            df = get_h1(symbol)
             if df.empty or len(df) < 60:
                 print(f"{label}: ⚠️ Datos insuficientes")
                 continue
@@ -79,5 +84,15 @@ if __name__ == "__main__":
                 if sell: signals.append("SELL")
 
             print(f"{label}: {len(signals)} señales en las últimas {len(df)} velas")
+            time.sleep(2)  # pausa para evitar rate limit
         except Exception as e:
             print(f"{label}: ⚠️ Error {e}")
+
+# ================= MAIN =================
+if __name__ == "__main__":
+    print("=== BACKTEST EMA20/50 + RSI (H1) ===")
+    print("\n--- Grupo 1 ---")
+    backtest_group(GRUPO_1)
+
+    print("\n--- Grupo 2 ---")
+    backtest_group(GRUPO_2)
