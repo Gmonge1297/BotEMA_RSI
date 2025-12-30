@@ -1,4 +1,4 @@
-# bot_alert_ema20_50_rsi_full.py
+# bot_alert_ema20_50_rsi_safe.py
 import os
 import json
 import time
@@ -79,7 +79,7 @@ def lot_size(entry: float, sl: float, symbol: str) -> float:
     stop_pips = abs(entry - sl) / pip_sz
     pip_value = 10.0 if "JPY" not in symbol else 9.0
     if "XAUUSD" in symbol:
-        pip_value = 1.0  # oro: pip value distinto
+        pip_value = 1.0
     if stop_pips <= 0:
         return 0.01
     lot = MAX_RISK_USD / (stop_pips * pip_value)
@@ -92,12 +92,15 @@ def send_email(subject, body):
     msg["To"] = EMAIL_TO
     msg["Subject"] = subject
     msg.attach(MIMEText(body, "plain"))
-    server = smtplib.SMTP("smtp.gmail.com", 587)
-    server.starttls()
-    server.login(EMAIL_USER, EMAIL_PASSWORD)
-    server.send_message(msg)
-    server.quit()
-    print("📧 Email enviado")
+    try:
+        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server.starttls()
+        server.login(EMAIL_USER, EMAIL_PASSWORD)
+        server.send_message(msg)
+        server.quit()
+        print("📧 Email enviado")
+    except Exception as e:
+        print(f"⚠️ Error enviando email: {e}")
 
 # ================= DATOS =================
 def get_h1(symbol: str, days: int = 30) -> pd.DataFrame:
@@ -105,14 +108,23 @@ def get_h1(symbol: str, days: int = 30) -> pd.DataFrame:
     to_date = datetime.now(timezone.utc)
     from_date = to_date - timedelta(days=days)
 
-    aggs = client.get_aggs(
-        ticker=symbol,
-        multiplier=1,
-        timespan="hour",
-        from_=from_date.date(),
-        to=to_date.date(),
-        limit=50000,
-    )
+    try:
+        aggs = client.get_aggs(
+            ticker=symbol,
+            multiplier=1,
+            timespan="hour",
+            from_=from_date.date(),
+            to=to_date.date(),
+            limit=50000,
+        )
+    except Exception as e:
+        # Manejo especial para rate limit
+        if "429" in str(e):
+            print(f"  ⚠️ Rate limit alcanzado en {symbol}, esperando 60s...")
+            time.sleep(60)
+        else:
+            print(f"  ⚠️ Error al obtener datos de {symbol}: {e}")
+        return pd.DataFrame()
 
     df = pd.DataFrame(aggs)
     if df.empty:
@@ -140,7 +152,7 @@ def analyze(label: str, symbol: str, state: dict):
 
     df = get_h1(symbol)
     if df is None or len(df) < 60:
-        print("  ⚠️ Datos insuficientes")
+        print("  ⚠️ Datos insuficientes o error técnico")
         return
 
     close = df["close"]
@@ -172,7 +184,7 @@ def analyze(label: str, symbol: str, state: dict):
     )
 
     if not (buy or sell):
-        print("  ❌ No hay señal")
+        print("  ❌ No hay señal en esta vela")
         return
 
     direction = "BUY" if buy else "SELL"
@@ -182,7 +194,6 @@ def analyze(label: str, symbol: str, state: dict):
     tp = entry + TP_PIPS * pip_sz if buy else entry - TP_PIPS * pip_sz
     lot = lot_size(entry, sl, symbol)
 
-    # Ajuste especial para oro
     mt5_symbol = "GOLD" if "XAUUSD" in symbol else label
 
     msg = f"""✅ SEÑAL {direction} {label} (MT5: {mt5_symbol})
@@ -208,7 +219,7 @@ if __name__ == "__main__":
     for label, symbol in PARES:
         try:
             analyze(label, symbol, state)
-            time.sleep(2)
+            time.sleep(5)  # más tiempo entre pares para evitar rate limit
         except Exception as e:
             print(f"  ⚠️ Error analizando {label}: {e}")
 
