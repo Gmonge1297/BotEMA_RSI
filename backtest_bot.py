@@ -23,7 +23,7 @@ GRUPO_2 = [
 ]
 
 # Número de días de histórico a usar (ajustable)
-DIAS = 5
+DIAS = 15
 
 # ================= FUNCIONES =================
 def ema(series, span):
@@ -66,7 +66,7 @@ def backtest_group(group):
         try:
             df = get_h1(symbol)
             if df.empty or len(df) < 60:
-                print(f"{label}: ⚠️ Datos insuficientes")
+                print(f"{label}: ⚠️ Mercado cerrado o datos insuficientes")
                 continue
 
             ema20 = ema(df["close"], 20)
@@ -84,7 +84,7 @@ def backtest_group(group):
                 if sell: signals.append("SELL")
 
             print(f"{label}: {len(signals)} señales en las últimas {len(df)} velas")
-            time.sleep(2)  # pausa para evitar rate limit
+            time.sleep(5)  # pausa más larga para evitar rate limit
         except Exception as e:
             print(f"{label}: ⚠️ Error {e}")
 
