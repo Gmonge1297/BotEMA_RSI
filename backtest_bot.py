@@ -22,7 +22,7 @@ PARES = [
 DIAS = 10       # histórico a analizar
 TP_PIPS = 30    # take profit en pips (FX)
 SL_PIPS = 20    # stop loss en pips (FX)
-LOOKAHEAD = 20  # número de velas adelante para evaluar TP/SL
+LOOKAHEAD = 20  # número de velas adelante para FX
 
 # ================= FUNCIONES =================
 def ema(series, span):
@@ -72,7 +72,13 @@ def backtest_pair(label, symbol):
 
     total, wins, losses, neutral = 0, 0, 0, 0
 
-    for i in range(52, len(df) - LOOKAHEAD):
+    # Configuración dinámica de lookahead
+    if label == "XAUUSD":
+        lookahead = 40
+    else:
+        lookahead = LOOKAHEAD
+
+    for i in range(52, len(df) - lookahead):
         # Últimas 3 velas
         c_last3 = df["close"].iloc[i-3:i]
         o_last3 = df["open"].iloc[i-3:i]
@@ -97,17 +103,17 @@ def backtest_pair(label, symbol):
         if buy or sell:
             total += 1
             entry = df["close"].iloc[i]
-            future = df.iloc[i+1:i+LOOKAHEAD]
+            future = df.iloc[i+1:i+lookahead]
 
             # Configuración dinámica de TP/SL
             if label == "XAUUSD":
-                tp_points = 500
-                sl_points = 300
-                tp_factor = 1.0  # oro se mide en puntos directos
+                tp_points = 800
+                sl_points = 500
+                tp_factor = 1.0  # oro en puntos directos
             else:
                 tp_points = TP_PIPS
                 sl_points = SL_PIPS
-                tp_factor = 0.0001  # pares FX en pips
+                tp_factor = 0.0001  # FX en pips
 
             if buy:
                 tp = entry + tp_points * tp_factor
