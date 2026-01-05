@@ -5,7 +5,7 @@ from polygon import RESTClient
 import os
 import smtplib
 from email.mime.text import MIMEText
-import time  # FIX: necesario para time.sleep
+import time
 
 # ================= CONFIGURACIÓN =================
 POLYGON_API_KEY = os.getenv("POLYGON_API_KEY")
@@ -27,8 +27,11 @@ TP_XAU = 800
 SL_XAU = 500
 LOOKAHEAD_XAU = 40
 
-# Email env (alineado con tu log)
-EMAIL_USER = os.getenv("EMAIL_USER")      # remitente
+# Riesgo y balance (ejemplo: balance 1000 USD, riesgo 0.5%)
+BALANCE = 1000
+RISK_PERCENT = 0.5
+
+EMAIL_USER = os.getenv("EMAIL_USER")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_TO = os.getenv("EMAIL_TO")
 SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
@@ -54,7 +57,7 @@ def adx(df, period=14):
     close = df["close"]
 
     up_move = high.diff()
-    down_move = low.diff() * -1
+    down_move = (low.diff() * -1)
 
     plus_dm = np.where((up_move > 0) & (up_move > down_move), up_move, 0.0)
     minus_dm = np.where((down_move > 0) & (down_move > up_move), down_move, 0.0)
@@ -73,7 +76,7 @@ def adx(df, period=14):
     adx_v = dx.rolling(period).mean()
     return adx_v.fillna(20)
 
-def get_h1(symbol: str, days: int = 15) -> pd.DataFrame:  # más histórico
+def get_h1(symbol: str, days: int = 10) -> pd.DataFrame:
     client = RESTClient(POLYGON_API_KEY)
     to_date = datetime.now(timezone.utc)
     from_date = to_date - timedelta(days=days)
@@ -95,26 +98,31 @@ def get_h1(symbol: str, days: int = 15) -> pd.DataFrame:  # más histórico
     df = df.rename(columns=col_map)
     return df[["open", "high", "low", "close"]].dropna()
 
-def send_email(subject, body):
-    if not (EMAIL_USER and EMAIL_PASSWORD and EMAIL_TO):
-        return "⚠️ Email no configurado (EMAIL_USER/EMAIL_PASSWORD/EMAIL_TO)"
-    msg = MIMEText(body)
-    msg["Subject"] = subject
-    msg["From"] = EMAIL_USER
-    msg["To"] = EMAIL_TO
-    try:
-        with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT) as server:
-            server.login(EMAIL_USER, EMAIL_PASSWORD)
-            server.sendmail(EMAIL_USER, EMAIL_TO, msg.as_string())
-        return "✅ Email enviado"
-    except Exception as e:
-        return f"⚠️ Error enviando email: {e}"
+def calc_lot(entry, sl, balance=BALANCE, risk_percent=RISK_PERCENT, pip_value=10):
+    risk_amount = balance * (risk_percent / 100)
+    stop_distance = abs(entry - sl)
+    # aproximación: lote = riesgo / (stop_distance * pip_value)
+    lot = risk_amount / (stop_distance * pip_value) if stop_distance > 0 else 0.1
+    return round(risk_amount, 2), round(lot, 2)
 
-def check_signals(label, symbol):
+def format_alert(label, side, entry, tp, sl, rsi_val):
+    risk_amount, lot = calc_lot(entry, sl)
+    arrow = "📈" if side == "BUY" else "📉"
+    return (
+        f"{arrow} {side} Confirmado {label}\n\n"
+        f"Entrada: {entry}\n"
+        f"SL: {sl}\n"
+        f"TP: {tp}\n"
+        f"RSI: {round(rsi_val,1)}\n"
+        f"Riesgo: ${risk_amount}\n"
+        f"Lote sugerido: {lot}\n"
+    )
+
+def analyze_pair(label, symbol):
     df = get_h1(symbol)
-    min_bars = 80 if label == "XAUUSD" else 60  # relajamos umbral y adaptamos a oro
+    min_bars = 80 if label == "XAUUSD" else 60
     if df.empty or len(df) < min_bars:
-        return f"{label}: ⚠️ Datos insuficientes ({len(df)} velas)"
+        return []
 
     ema20 = ema(df["close"], 20)
     ema50 = ema(df["close"], 50)
@@ -145,48 +153,60 @@ def check_signals(label, symbol):
             all(c_last3 < o_last3)
         )
 
-        # Filtro extra para oro: ADX > 20 (fuerza de tendencia)
         if label == "XAUUSD" and adx_v.iloc[i] < 20:
             buy, sell = False, False
 
         if buy or sell:
             entry = df["close"].iloc[i]
-            future = df.iloc[i+1:i+lookahead]
+            rsi_val = rsi_v.iloc[i]
 
             if buy:
                 tp = entry + tp_points * tp_factor
                 sl = entry - sl_points * tp_factor
-                if (future["high"] >= tp).any():
-                    signals.append(f"{label} BUY ✅ TP alcanzado")
-                elif (future["low"] <= sl).any():
-                    signals.append(f"{label} BUY ❌ SL alcanzado")
-                else:
-                    signals.append(f"{label} BUY ⏸ Neutro")
+                signals.append(format_alert(label, "BUY", entry, tp, sl, rsi_val))
 
             if sell:
                 tp = entry - tp_points * tp_factor
                 sl = entry + sl_points * tp_factor
-                if (future["low"] <= tp).any():
-                    signals.append(f"{label} SELL ✅ TP alcanzado")
-                elif (future["high"] >= sl).any():
-                    signals.append(f"{label} SELL ❌ SL alcanzado")
-                else:
-                    signals.append(f"{label} SELL ⏸ Neutro")
+                signals.append(format_alert(label, "SELL", entry, tp, sl, rsi_val))
 
-    if signals:
-        body = "\n".join(signals)
-        email_status = send_email(f"Señales {label}", body)
-        return f"{label}: {len(signals)} señales enviadas ({email_status})"
-    else:
-        return f"{label}: sin señales"
+    return signals
+
+def send_email(subject, body):
+    if not (EMAIL_USER and EMAIL_PASSWORD and EMAIL_TO):
+        return "⚠️ Email no configurado"
+    msg = MIMEText(body)
+    msg["Subject"] = subject
+    msg["From"] = EMAIL_USER
+    msg["To"] = EMAIL_TO
+    try:
+        with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT) as server:
+            server.login(EMAIL_USER, EMAIL_PASSWORD)
+            server.sendmail(EMAIL_USER, EMAIL_TO, msg.as_string())
+        return "✅ Email enviado"
+    except Exception as e:
+        return f"⚠️ Error enviando email: {e}"
 
 # ================= MAIN =================
 if __name__ == "__main__":
     print("=== ALERTAS EMA20/50 + RSI (últimas 3 velas, con ADX en oro) ===")
+    all_signals = []
     for label, symbol in PARES:
         try:
-            result = check_signals(label, symbol)
-            print(result)
-            time.sleep(15)  # pausa larga para evitar límite de API
+            signals = analyze_pair(label, symbol)
+            if signals:
+                all_signals.append(f"--- {label} ---")
+                all_signals.extend(signals)
+            print(f"{label}: {len(signals)} señales detectadas")
+            time.sleep(15)
         except Exception as e:
             print(f"{label}: ⚠️ Error {e}")
+
+    if all_signals:
+        subject = "Señales de Trading"
+        body = "\n".join(all_signals)
+        status = send_email(subject, body)
+        print(f"EMAIL: {status}")
+    else:
+        print("
+
