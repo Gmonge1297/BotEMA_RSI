@@ -12,17 +12,17 @@ PARES = [
     ("EURUSD", "C:EURUSD"),
     ("GBPUSD", "C:GBPUSD"),
     ("USDJPY", "C:USDJPY"),
-    ("XAUUSD", "C:XAUUSD"),
     ("AUDUSD", "C:AUDUSD"),
     ("NZDUSD", "C:NZDUSD"),
     ("USDCAD", "C:USDCAD"),
-    
+    ("GBPAUD", "C:GBPAUD"),
+    ("XAUUSD", "C:XAUUSD"),
 ]
 
-DIAS = 10  # histórico a analizar
-TP_PIPS = 30   # take profit en pips (ajustado)
-SL_PIPS = 20   # stop loss en pips (ajustado)
-LOOKAHEAD = 20 # número de velas adelante para evaluar TP/SL
+DIAS = 10       # histórico a analizar
+TP_PIPS = 30    # take profit en pips (FX)
+SL_PIPS = 20    # stop loss en pips (FX)
+LOOKAHEAD = 20  # número de velas adelante para evaluar TP/SL
 
 # ================= FUNCIONES =================
 def ema(series, span):
@@ -99,9 +99,19 @@ def backtest_pair(label, symbol):
             entry = df["close"].iloc[i]
             future = df.iloc[i+1:i+LOOKAHEAD]
 
+            # Configuración dinámica de TP/SL
+            if label == "XAUUSD":
+                tp_points = 500
+                sl_points = 300
+                tp_factor = 1.0  # oro se mide en puntos directos
+            else:
+                tp_points = TP_PIPS
+                sl_points = SL_PIPS
+                tp_factor = 0.0001  # pares FX en pips
+
             if buy:
-                tp = entry + TP_PIPS * 0.0001
-                sl = entry - SL_PIPS * 0.0001
+                tp = entry + tp_points * tp_factor
+                sl = entry - sl_points * tp_factor
                 if (future["high"] >= tp).any():
                     wins += 1
                 elif (future["low"] <= sl).any():
@@ -110,8 +120,8 @@ def backtest_pair(label, symbol):
                     neutral += 1
 
             if sell:
-                tp = entry - TP_PIPS * 0.0001
-                sl = entry + SL_PIPS * 0.0001
+                tp = entry - tp_points * tp_factor
+                sl = entry + sl_points * tp_factor
                 if (future["low"] <= tp).any():
                     wins += 1
                 elif (future["high"] >= sl).any():
@@ -127,6 +137,6 @@ if __name__ == "__main__":
     for label, symbol in PARES:
         try:
             backtest_pair(label, symbol)
-            time.sleep(5)
+            time.sleep(15)  # pausa larga para evitar límite de API
         except Exception as e:
             print(f"{label}: ⚠️ Error {e}")
