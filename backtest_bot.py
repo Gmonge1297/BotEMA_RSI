@@ -12,15 +12,17 @@ PARES = [
     ("EURUSD", "C:EURUSD"),
     ("GBPUSD", "C:GBPUSD"),
     ("USDJPY", "C:USDJPY"),
+    ("XAUUSD", "C:XAUUSD"),
     ("AUDUSD", "C:AUDUSD"),
     ("NZDUSD", "C:NZDUSD"),
     ("USDCAD", "C:USDCAD"),
-    ("XAUUSD", "C:XAUUSD"),
+    
 ]
 
 DIAS = 10  # histórico a analizar
-TP_PIPS = 50   # take profit en pips
-SL_PIPS = 30   # stop loss en pips
+TP_PIPS = 30   # take profit en pips (ajustado)
+SL_PIPS = 20   # stop loss en pips (ajustado)
+LOOKAHEAD = 20 # número de velas adelante para evaluar TP/SL
 
 # ================= FUNCIONES =================
 def ema(series, span):
@@ -68,9 +70,9 @@ def backtest_pair(label, symbol):
     ema50 = ema(df["close"], 50)
     rsi_v = rsi(df["close"], 14)
 
-    wins, losses = 0, 0
+    total, wins, losses, neutral = 0, 0, 0, 0
 
-    for i in range(52, len(df)):
+    for i in range(52, len(df) - LOOKAHEAD):
         # Últimas 3 velas
         c_last3 = df["close"].iloc[i-3:i]
         o_last3 = df["open"].iloc[i-3:i]
@@ -93,16 +95,19 @@ def backtest_pair(label, symbol):
         )
 
         if buy or sell:
+            total += 1
             entry = df["close"].iloc[i]
-            future = df.iloc[i+1:i+10]  # mirar hasta 10 velas adelante
+            future = df.iloc[i+1:i+LOOKAHEAD]
 
             if buy:
-                tp = entry + TP_PIPS * 0.0001  # pips para pares FX
+                tp = entry + TP_PIPS * 0.0001
                 sl = entry - SL_PIPS * 0.0001
                 if (future["high"] >= tp).any():
                     wins += 1
                 elif (future["low"] <= sl).any():
                     losses += 1
+                else:
+                    neutral += 1
 
             if sell:
                 tp = entry - TP_PIPS * 0.0001
@@ -111,12 +116,14 @@ def backtest_pair(label, symbol):
                     wins += 1
                 elif (future["high"] >= sl).any():
                     losses += 1
+                else:
+                    neutral += 1
 
-    print(f"{label}: {wins} ganadoras, {losses} perdedoras en {len(df)} velas")
+    print(f"{label}: {total} señales → {wins} ganadoras, {losses} perdedoras, {neutral} neutras")
 
 # ================= MAIN =================
 if __name__ == "__main__":
-    print("=== BACKTEST EMA20/50 + RSI (H1, últimas 3 velas, TP/SL) ===")
+    print("=== BACKTEST EMA20/50 + RSI (H1, últimas 3 velas, TP/SL/neutras) ===")
     for label, symbol in PARES:
         try:
             backtest_pair(label, symbol)
