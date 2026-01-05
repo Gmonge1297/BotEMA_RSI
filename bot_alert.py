@@ -5,6 +5,7 @@ from polygon import RESTClient
 import os
 import smtplib
 from email.mime.text import MIMEText
+import time  # FIX: necesario para time.sleep
 
 # ================= CONFIGURACIÓN =================
 POLYGON_API_KEY = os.getenv("POLYGON_API_KEY")
@@ -16,18 +17,22 @@ PARES = [
     ("XAUUSD", "C:XAUUSD"),
 ]
 
-TP_PIPS = 30    # FX TP
-SL_PIPS = 20    # FX SL
-LOOKAHEAD = 20  # FX ventana
+# FX params
+TP_PIPS = 30
+SL_PIPS = 20
+LOOKAHEAD = 20
 
-TP_XAU = 800    # Oro TP
-SL_XAU = 500    # Oro SL
-LOOKAHEAD_XAU = 40  # Oro ventana
+# Oro params
+TP_XAU = 800
+SL_XAU = 500
+LOOKAHEAD_XAU = 40
 
-EMAIL_TO = os.getenv("ALERT_EMAIL")
-EMAIL_FROM = os.getenv("BOT_EMAIL")
-SMTP_SERVER = os.getenv("SMTP_SERVER")
-SMTP_PASS = os.getenv("SMTP_PASS")
+# Email env (alineado con tu log)
+EMAIL_USER = os.getenv("EMAIL_USER")      # remitente
+EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
+EMAIL_TO = os.getenv("EMAIL_TO")
+SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "465"))
 
 # ================= FUNCIONES =================
 def ema(series, span):
@@ -40,35 +45,35 @@ def rsi(series, period=14):
     avg_gain = gain.rolling(period).mean()
     avg_loss = loss.rolling(period).mean()
     rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.fillna(50)
+    rsi_v = 100 - (100 / (1 + rs))
+    return rsi_v.fillna(50)
 
 def adx(df, period=14):
-    # ADX para medir fuerza de tendencia
     high = df["high"]
     low = df["low"]
     close = df["close"]
 
-    plus_dm = high.diff()
-    minus_dm = low.diff()
+    up_move = high.diff()
+    down_move = low.diff() * -1
 
-    plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0.0)
-    minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0.0)
+    plus_dm = np.where((up_move > 0) & (up_move > down_move), up_move, 0.0)
+    minus_dm = np.where((down_move > 0) & (down_move > up_move), down_move, 0.0)
 
-    tr1 = pd.DataFrame(high - low)
-    tr2 = pd.DataFrame(abs(high - close.shift(1)))
-    tr3 = pd.DataFrame(abs(low - close.shift(1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    tr = pd.concat([
+        (high - low),
+        (high - close.shift(1)).abs(),
+        (low - close.shift(1)).abs()
+    ], axis=1).max(axis=1)
 
     atr = tr.rolling(period).mean()
 
     plus_di = 100 * (pd.Series(plus_dm).rolling(period).mean() / atr)
     minus_di = 100 * (pd.Series(minus_dm).rolling(period).mean() / atr)
     dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
-    adx = dx.rolling(period).mean()
-    return adx.fillna(20)
+    adx_v = dx.rolling(period).mean()
+    return adx_v.fillna(20)
 
-def get_h1(symbol: str, days: int = 5) -> pd.DataFrame:
+def get_h1(symbol: str, days: int = 15) -> pd.DataFrame:  # más histórico
     client = RESTClient(POLYGON_API_KEY)
     to_date = datetime.now(timezone.utc)
     from_date = to_date - timedelta(days=days)
@@ -91,26 +96,31 @@ def get_h1(symbol: str, days: int = 5) -> pd.DataFrame:
     return df[["open", "high", "low", "close"]].dropna()
 
 def send_email(subject, body):
+    if not (EMAIL_USER and EMAIL_PASSWORD and EMAIL_TO):
+        return "⚠️ Email no configurado (EMAIL_USER/EMAIL_PASSWORD/EMAIL_TO)"
     msg = MIMEText(body)
     msg["Subject"] = subject
-    msg["From"] = EMAIL_FROM
+    msg["From"] = EMAIL_USER
     msg["To"] = EMAIL_TO
-
-    with smtplib.SMTP_SSL(SMTP_SERVER, 465) as server:
-        server.login(EMAIL_FROM, SMTP_PASS)
-        server.sendmail(EMAIL_FROM, EMAIL_TO, msg.as_string())
+    try:
+        with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT) as server:
+            server.login(EMAIL_USER, EMAIL_PASSWORD)
+            server.sendmail(EMAIL_USER, EMAIL_TO, msg.as_string())
+        return "✅ Email enviado"
+    except Exception as e:
+        return f"⚠️ Error enviando email: {e}"
 
 def check_signals(label, symbol):
     df = get_h1(symbol)
-    if df.empty or len(df) < 60:
-        return f"{label}: ⚠️ Datos insuficientes"
+    min_bars = 80 if label == "XAUUSD" else 60  # relajamos umbral y adaptamos a oro
+    if df.empty or len(df) < min_bars:
+        return f"{label}: ⚠️ Datos insuficientes ({len(df)} velas)"
 
     ema20 = ema(df["close"], 20)
     ema50 = ema(df["close"], 50)
     rsi_v = rsi(df["close"], 14)
     adx_v = adx(df)
 
-    # Configuración dinámica
     if label == "XAUUSD":
         tp_points, sl_points, tp_factor, lookahead = TP_XAU, SL_XAU, 1.0, LOOKAHEAD_XAU
     else:
@@ -135,10 +145,9 @@ def check_signals(label, symbol):
             all(c_last3 < o_last3)
         )
 
-        # Filtro extra para oro: ADX > 20
-        if label == "XAUUSD":
-            if adx_v.iloc[i] < 20:
-                buy, sell = False, False
+        # Filtro extra para oro: ADX > 20 (fuerza de tendencia)
+        if label == "XAUUSD" and adx_v.iloc[i] < 20:
+            buy, sell = False, False
 
         if buy or sell:
             entry = df["close"].iloc[i]
@@ -166,8 +175,8 @@ def check_signals(label, symbol):
 
     if signals:
         body = "\n".join(signals)
-        send_email(f"Señales {label}", body)
-        return f"{label}: {len(signals)} señales enviadas"
+        email_status = send_email(f"Señales {label}", body)
+        return f"{label}: {len(signals)} señales enviadas ({email_status})"
     else:
         return f"{label}: sin señales"
 
