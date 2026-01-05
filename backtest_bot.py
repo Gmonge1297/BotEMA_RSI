@@ -19,6 +19,8 @@ PARES = [
 ]
 
 DIAS = 10  # histórico a analizar
+TP_PIPS = 50   # take profit en pips
+SL_PIPS = 30   # stop loss en pips
 
 # ================= FUNCIONES =================
 def ema(series, span):
@@ -56,47 +58,68 @@ def get_h1(symbol: str, days: int = DIAS) -> pd.DataFrame:
     df = df.rename(columns=col_map)
     return df[["open", "high", "low", "close"]].dropna()
 
-# ================= BACKTEST =================
+def backtest_pair(label, symbol):
+    df = get_h1(symbol)
+    if df.empty or len(df) < 60:
+        print(f"{label}: ⚠️ Datos insuficientes")
+        return
+
+    ema20 = ema(df["close"], 20)
+    ema50 = ema(df["close"], 50)
+    rsi_v = rsi(df["close"], 14)
+
+    wins, losses = 0, 0
+
+    for i in range(52, len(df)):
+        # Últimas 3 velas
+        c_last3 = df["close"].iloc[i-3:i]
+        o_last3 = df["open"].iloc[i-3:i]
+        ema20_last3 = ema20.iloc[i-3:i]
+        ema50_last3 = ema50.iloc[i-3:i]
+        rsi_last3 = rsi_v.iloc[i-3:i]
+
+        # Condiciones de compra
+        buy = (
+            all(ema20_last3 > ema50_last3) and
+            all(rsi_last3 > 55) and
+            all(c_last3 > o_last3)
+        )
+
+        # Condiciones de venta
+        sell = (
+            all(ema20_last3 < ema50_last3) and
+            all(rsi_last3 < 45) and
+            all(c_last3 < o_last3)
+        )
+
+        if buy or sell:
+            entry = df["close"].iloc[i]
+            future = df.iloc[i+1:i+10]  # mirar hasta 10 velas adelante
+
+            if buy:
+                tp = entry + TP_PIPS * 0.0001  # pips para pares FX
+                sl = entry - SL_PIPS * 0.0001
+                if (future["high"] >= tp).any():
+                    wins += 1
+                elif (future["low"] <= sl).any():
+                    losses += 1
+
+            if sell:
+                tp = entry - TP_PIPS * 0.0001
+                sl = entry + SL_PIPS * 0.0001
+                if (future["low"] <= tp).any():
+                    wins += 1
+                elif (future["high"] >= sl).any():
+                    losses += 1
+
+    print(f"{label}: {wins} ganadoras, {losses} perdedoras en {len(df)} velas")
+
+# ================= MAIN =================
 if __name__ == "__main__":
-    print("=== BACKTEST EMA20/50 + RSI (H1, últimas 3 velas) ===")
+    print("=== BACKTEST EMA20/50 + RSI (H1, últimas 3 velas, TP/SL) ===")
     for label, symbol in PARES:
         try:
-            df = get_h1(symbol)
-            if df.empty or len(df) < 60:
-                print(f"{label}: ⚠️ Datos insuficientes")
-                continue
-
-            ema20 = ema(df["close"], 20)
-            ema50 = ema(df["close"], 50)
-            rsi_v = rsi(df["close"], 14)
-
-            signals = []
-            for i in range(52, len(df)):
-                # Tomamos las últimas 3 velas
-                c_last3 = df["close"].iloc[i-3:i]
-                o_last3 = df["open"].iloc[i-3:i]
-                ema20_last3 = ema20.iloc[i-3:i]
-                ema50_last3 = ema50.iloc[i-3:i]
-                rsi_last3 = rsi_v.iloc[i-3:i]
-
-                # Condiciones de compra
-                buy = (
-                    all(ema20_last3 > ema50_last3) and
-                    all(rsi_last3 > 55) and
-                    all(c_last3 > o_last3)
-                )
-
-                # Condiciones de venta
-                sell = (
-                    all(ema20_last3 < ema50_last3) and
-                    all(rsi_last3 < 45) and
-                    all(c_last3 < o_last3)
-                )
-
-                if buy: signals.append("BUY")
-                if sell: signals.append("SELL")
-
-            print(f"{label}: {len(signals)} señales en las últimas {len(df)} velas")
-            time.sleep(5)  # pausa para evitar rate limit
+            backtest_pair(label, symbol)
+            time.sleep(5)
         except Exception as e:
             print(f"{label}: ⚠️ Error {e}")
