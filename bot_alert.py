@@ -133,14 +133,14 @@ def current_signal(label, symbol):
     adx_v = adx(df)
 
     i = len(df) - 1
-    last_ts = df.index[i]
-    now_utc = datetime.utcnow().replace(minute=0, second=0, microsecond=0)
+    last_ts = df.index[i]  # aware UTC
+    now_utc = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)  # aware UTC
 
     # Filtro: descartar si la vela evaluada es más antigua que la última esperada
     if last_ts < now_utc - timedelta(hours=1):
         return None, f"{label}: señal descartada por vela antigua ({last_ts})"
 
-    # Usar contexto de las últimas 3 velas para confirmar
+    # Contexto de las últimas 3 velas
     c_last3 = df["close"].iloc[i-3:i]
     o_last3 = df["open"].iloc[i-3:i]
     ema20_last3 = ema20.iloc[i-3:i]
