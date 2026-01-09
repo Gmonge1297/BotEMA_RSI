@@ -132,52 +132,53 @@ def current_signal(label, symbol):
     rsi_v = rsi(df["close"], 14)
     adx_v = adx(df)
 
-    # Revisar últimas 5 velas cerradas (de la más reciente hacia atrás)
-    for i in range(len(df)-1, max(len(df)-5, 2), -1):
-        c_last3 = df["close"].iloc[i-3:i]
-        o_last3 = df["open"].iloc[i-3:i]
-        ema20_last3 = ema20.iloc[i-3:i]
-        ema50_last3 = ema50.iloc[i-3:i]
-        rsi_last3 = rsi_v.iloc[i-3:i]
+    # Solo la última vela cerrada
+    i = len(df) - 1
+    last_ts = df.index[i]
+    c_last3 = df["close"].iloc[i-3:i]
+    o_last3 = df["open"].iloc[i-3:i]
+    ema20_last3 = ema20.iloc[i-3:i]
+    ema50_last3 = ema50.iloc[i-3:i]
+    rsi_last3 = rsi_v.iloc[i-3:i]
 
-        # Condiciones relajadas
-        buy = (
-            all(ema20_last3 > ema50_last3) and
-            rsi_last3.mean() > 50 and
-            sum(c_last3 > o_last3) >= 2
-        )
-        sell = (
-            all(ema20_last3 < ema50_last3) and
-            rsi_last3.mean() < 50 and
-            sum(c_last3 < o_last3) >= 2
-        )
+    buy = (
+        all(ema20_last3 > ema50_last3) and
+        rsi_last3.mean() > 50 and
+        sum(c_last3 > o_last3) >= 2
+    )
+    sell = (
+        all(ema20_last3 < ema50_last3) and
+        rsi_last3.mean() < 50 and
+        sum(c_last3 < o_last3) >= 2
+    )
 
-        # Filtro oro con ADX suavizado
-        if label == "XAUUSD" and adx_v.rolling(3).mean().iloc[i] < 18:
-            buy, sell = False, False
+    if label == "XAUUSD" and adx_v.rolling(3).mean().iloc[i] < 18:
+        buy, sell = False, False
 
-        if buy or sell:
-            entry = df["close"].iloc[i]
-            rsi_val = rsi_v.iloc[i]
+    if buy or sell:
+        entry = df["close"].iloc[i]
+        rsi_val = rsi_v.iloc[i]
 
-            if label == "XAUUSD":
-                tp_points, sl_points, pip_factor = TP_XAU, SL_XAU, 1.0
-            else:
-                tp_points, sl_points, pip_factor = TP_PIPS, SL_PIPS, 0.0001
+        if label == "XAUUSD":
+            tp_points, sl_points, pip_factor = TP_XAU, SL_XAU, 1.0
+        else:
+            tp_points, sl_points, pip_factor = TP_PIPS, SL_PIPS, 0.0001
 
-            if buy:
-                tp = entry + tp_points * pip_factor
-                sl = entry - sl_points * pip_factor
-                alert = format_alert(label, "BUY", entry, tp, sl, rsi_val, pip_factor)
-                return alert, f"{label}: BUY confirmado"
+        if buy:
+            tp = entry + tp_points * pip_factor
+            sl = entry - sl_points * pip_factor
+            alert = format_alert(label, "BUY", entry, tp, sl, rsi_val, pip_factor)
+            status = f"{label}: BUY confirmado (vela {last_ts})"
+            return alert, status
 
-            if sell:
-                tp = entry - tp_points * pip_factor
-                sl = entry + sl_points * pip_factor
-                alert = format_alert(label, "SELL", entry, tp, sl, rsi_val, pip_factor)
-                return alert, f"{label}: SELL confirmado"
+        if sell:
+            tp = entry - tp_points * pip_factor
+            sl = entry + sl_points * pip_factor
+            alert = format_alert(label, "SELL", entry, tp, sl, rsi_val, pip_factor)
+            status = f"{label}: SELL confirmado (vela {last_ts})"
+            return alert, status
 
-    return None, f"{label}: sin señal reciente"
+    return None, f"{label}: sin señal en la última vela (vela {last_ts})"
 
 # ================= EMAIL =================
 def send_email(subject, body):
@@ -198,26 +199,30 @@ def send_email(subject, body):
 # ================= MAIN =================
 if __name__ == "__main__":
     print("=== ALERTAS EMA20/50 + RSI (últimas 3 velas, con ADX en oro) ===")
-    alerts = []
-    statuses = []
+
+    # Esperar 30s para asegurar que la vela H1 cerrada esté publicada
+    time.sleep(30)
+
+    any_alert = False
 
     for label, symbol in PARES:
         try:
             alert, status = current_signal(label, symbol)
-            statuses.append(status)
             print(status)
-            if alert:
-                alerts.append(f"--- {label} ---\n{alert}")
-            time.sleep(15)  # pausa para evitar límite de API
-        except Exception as e:
-            err = f"{label}: ⚠️ Error {e}"
-            statuses.append(err)
-            print(err)
 
-    if alerts:
-        subject = "Señal de Trading (Tiempo real)"
-        body = "\n".join(statuses) + "\n\n" + "\n".join(alerts)
-        status_email = send_email(subject, body)
-        print(f"EMAIL: {status_email}")
-    else:
+            # Enviar un correo por par si hay señal
+            if alert:
+                any_alert = True
+                subject = f"Señal {label} (Tiempo real)"
+                body = f"{status}\n\n--- {label} ---\n{alert}"
+                status_email = send_email(subject, body)
+                print(f"{label} EMAIL: {status_email}")
+
+            # Pausa corta entre pares para evitar rate limits
+            time.sleep(10)
+
+        except Exception as e:
+            print(f"{label}: ⚠️ Error {e}")
+
+    if not any_alert:
         print("Sin señales recientes.")
