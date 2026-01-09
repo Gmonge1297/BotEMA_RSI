@@ -27,7 +27,7 @@ SL_XAU = 500
 
 # Riesgo y balance
 BALANCE = float(os.getenv("ACCOUNT_BALANCE", "1000"))
-RISK_PERCENT = float(os.getenv("RISK_PERCENT", "0.5"))
+RISK_PERCENT = float(os.getenv("RISK_PERCENT", "0.15"))
 PIP_VALUE_PER_LOT = float(os.getenv("PIP_VALUE_PER_LOT", "10"))
 
 # Email
