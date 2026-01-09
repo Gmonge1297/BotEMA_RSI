@@ -132,8 +132,8 @@ def current_signal(label, symbol):
     rsi_v = rsi(df["close"], 14)
     adx_v = adx(df)
 
-    # Revisar últimas 5 velas cerradas
-    for i in range(len(df)-5, len(df)):
+    # Revisar últimas 5 velas cerradas (de la más reciente hacia atrás)
+    for i in range(len(df)-1, max(len(df)-5, 2), -1):
         c_last3 = df["close"].iloc[i-3:i]
         o_last3 = df["open"].iloc[i-3:i]
         ema20_last3 = ema20.iloc[i-3:i]
@@ -198,4 +198,26 @@ def send_email(subject, body):
 # ================= MAIN =================
 if __name__ == "__main__":
     print("=== ALERTAS EMA20/50 + RSI (últimas 3 velas, con ADX en oro) ===")
+    alerts = []
+    statuses = []
 
+    for label, symbol in PARES:
+        try:
+            alert, status = current_signal(label, symbol)
+            statuses.append(status)
+            print(status)
+            if alert:
+                alerts.append(f"--- {label} ---\n{alert}")
+            time.sleep(15)  # pausa para evitar límite de API
+        except Exception as e:
+            err = f"{label}: ⚠️ Error {e}"
+            statuses.append(err)
+            print(err)
+
+    if alerts:
+        subject = "Señal de Trading (Tiempo real)"
+        body = "\n".join(statuses) + "\n\n" + "\n".join(alerts)
+        status_email = send_email(subject, body)
+        print(f"EMAIL: {status_email}")
+    else:
+        print("Sin señales recientes.")
