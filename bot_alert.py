@@ -20,7 +20,6 @@ PARES = [
 # FX params
 TP_PIPS = 30
 SL_PIPS = 20
-LOOKAHEAD_FX = 20  # solo para validar TP/SL en backtest; aquí no iteramos futuro
 
 # Oro params
 TP_XAU = 800
@@ -128,64 +127,57 @@ def current_signal(label, symbol):
     if df.empty or len(df) < min_bars:
         return None, f"{label}: ⚠️ Datos insuficientes ({len(df)} velas)"
 
-    # Usamos la última vela CERRADA como punto de evaluación
-    # i es el índice de la última vela cerrada
-    i = len(df) - 1
-
     ema20 = ema(df["close"], 20)
     ema50 = ema(df["close"], 50)
     rsi_v = rsi(df["close"], 14)
     adx_v = adx(df)
 
-    # Validar que hay al menos 3 velas previas
-    if i < 3:
-        return None, f"{label}: ⚠️ Muy poco histórico para confirmar últimas 3 velas"
+    # Revisar últimas 5 velas cerradas
+    for i in range(len(df)-5, len(df)):
+        c_last3 = df["close"].iloc[i-3:i]
+        o_last3 = df["open"].iloc[i-3:i]
+        ema20_last3 = ema20.iloc[i-3:i]
+        ema50_last3 = ema50.iloc[i-3:i]
+        rsi_last3 = rsi_v.iloc[i-3:i]
 
-    c_last3 = df["close"].iloc[i-3:i]
-    o_last3 = df["open"].iloc[i-3:i]
-    ema20_last3 = ema20.iloc[i-3:i]
-    ema50_last3 = ema50.iloc[i-3:i]
-    rsi_last3 = rsi_v.iloc[i-3:i]
+        # Condiciones relajadas
+        buy = (
+            all(ema20_last3 > ema50_last3) and
+            rsi_last3.mean() > 50 and
+            sum(c_last3 > o_last3) >= 2
+        )
+        sell = (
+            all(ema20_last3 < ema50_last3) and
+            rsi_last3.mean() < 50 and
+            sum(c_last3 < o_last3) >= 2
+        )
 
-    buy = (
-        all(ema20_last3 > ema50_last3) and
-        all(rsi_last3 > 55) and
-        all(c_last3 > o_last3)
-    )
-    sell = (
-        all(ema20_last3 < ema50_last3) and
-        all(rsi_last3 < 45) and
-        all(c_last3 < o_last3)
-    )
+        # Filtro oro con ADX suavizado
+        if label == "XAUUSD" and adx_v.rolling(3).mean().iloc[i] < 18:
+            buy, sell = False, False
 
-    # Filtro extra para oro: ADX > 20 en la barra actual
-    if label == "XAUUSD" and adx_v.iloc[i] < 20:
-        buy, sell = False, False
+        if buy or sell:
+            entry = df["close"].iloc[i]
+            rsi_val = rsi_v.iloc[i]
 
-    if not (buy or sell):
-        return None, f"{label}: sin señal en la última vela"
+            if label == "XAUUSD":
+                tp_points, sl_points, pip_factor = TP_XAU, SL_XAU, 1.0
+            else:
+                tp_points, sl_points, pip_factor = TP_PIPS, SL_PIPS, 0.0001
 
-    entry = df["close"].iloc[i]
-    rsi_val = rsi_v.iloc[i]
+            if buy:
+                tp = entry + tp_points * pip_factor
+                sl = entry - sl_points * pip_factor
+                alert = format_alert(label, "BUY", entry, tp, sl, rsi_val, pip_factor)
+                return alert, f"{label}: BUY confirmado"
 
-    if label == "XAUUSD":
-        tp_points, sl_points, pip_factor = TP_XAU, SL_XAU, 1.0
-    else:
-        tp_points, sl_points, pip_factor = TP_PIPS, SL_PIPS, 0.0001
+            if sell:
+                tp = entry - tp_points * pip_factor
+                sl = entry + sl_points * pip_factor
+                alert = format_alert(label, "SELL", entry, tp, sl, rsi_val, pip_factor)
+                return alert, f"{label}: SELL confirmado"
 
-    if buy:
-        tp = entry + tp_points * pip_factor
-        sl = entry - sl_points * pip_factor
-        alert = format_alert(label, "BUY", entry, tp, sl, rsi_val, pip_factor)
-        return alert, f"{label}: BUY confirmado"
-
-    if sell:
-        tp = entry - tp_points * pip_factor
-        sl = entry + sl_points * pip_factor
-        alert = format_alert(label, "SELL", entry, tp, sl, rsi_val, pip_factor)
-        return alert, f"{label}: SELL confirmado"
-
-    return None, f"{label}: sin señal"
+    return None, f"{label}: sin señal reciente"
 
 # ================= EMAIL =================
 def send_email(subject, body):
@@ -205,27 +197,4 @@ def send_email(subject, body):
 
 # ================= MAIN =================
 if __name__ == "__main__":
-    print("=== ALERTAS EMA20/50 + RSI (últimas 3 velas, con ADX en oro) ===")
-    alerts = []
-    statuses = []
-
-    for label, symbol in PARES:
-        try:
-            alert, status = current_signal(label, symbol)
-            statuses.append(status)
-            print(status)
-            if alert:
-                alerts.append(f"--- {label} ---\n{alert}")
-            time.sleep(15)
-        except Exception as e:
-            err = f"{label}: ⚠️ Error {e}"
-            statuses.append(err)
-            print(err)
-
-    if alerts:
-        subject = "Señal de Trading (Tiempo real)"
-        body = "\n".join(statuses) + "\n\n" + "\n".join(alerts)
-        status_email = send_email(subject, body)
-        print(f"EMAIL: {status_email}")
-    else:
-        print("Sin señales en la última vela.")
+    print("=== ALERTAS EMA20/50 + RSI (últimas 3 velas, con ADX en oro)
