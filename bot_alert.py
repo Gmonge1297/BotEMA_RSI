@@ -197,4 +197,5 @@ def send_email(subject, body):
 
 # ================= MAIN =================
 if __name__ == "__main__":
-    print("=== ALERTAS EMA20/50 + RSI (últimas 3 velas, con ADX en oro)
+    print("=== ALERTAS EMA20/50 + RSI (últimas 3 velas, con ADX en oro) ===")
+
