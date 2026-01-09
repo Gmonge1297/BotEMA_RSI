@@ -17,20 +17,20 @@ PARES = [
     ("XAUUSD", "C:XAUUSD"),
 ]
 
-# FX params
+# Parámetros FX
 TP_PIPS = 30
 SL_PIPS = 20
 
-# Oro params
+# Parámetros Oro
 TP_XAU = 800
 SL_XAU = 500
 
-# Riesgo y balance (ajusta según tu cuenta)
-BALANCE = float(os.getenv("ACCOUNT_BALANCE", "1000"))   # USD
-RISK_PERCENT = float(os.getenv("RISK_PERCENT", "0.5"))  # %
+# Riesgo y balance
+BALANCE = float(os.getenv("ACCOUNT_BALANCE", "1000"))
+RISK_PERCENT = float(os.getenv("RISK_PERCENT", "0.5"))
 PIP_VALUE_PER_LOT = float(os.getenv("PIP_VALUE_PER_LOT", "10"))
 
-# Email env
+# Email
 EMAIL_USER = os.getenv("EMAIL_USER")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_TO = os.getenv("EMAIL_TO")
@@ -132,9 +132,15 @@ def current_signal(label, symbol):
     rsi_v = rsi(df["close"], 14)
     adx_v = adx(df)
 
-    # Solo la última vela cerrada
     i = len(df) - 1
     last_ts = df.index[i]
+    now_utc = datetime.utcnow().replace(minute=0, second=0, microsecond=0)
+
+    # Filtro: descartar si la vela evaluada es más antigua que la última esperada
+    if last_ts < now_utc - timedelta(hours=1):
+        return None, f"{label}: señal descartada por vela antigua ({last_ts})"
+
+    # Usar contexto de las últimas 3 velas para confirmar
     c_last3 = df["close"].iloc[i-3:i]
     o_last3 = df["open"].iloc[i-3:i]
     ema20_last3 = ema20.iloc[i-3:i]
@@ -152,6 +158,7 @@ def current_signal(label, symbol):
         sum(c_last3 < o_last3) >= 2
     )
 
+    # Filtro oro con ADX suavizado
     if label == "XAUUSD" and adx_v.rolling(3).mean().iloc[i] < 18:
         buy, sell = False, False
 
@@ -168,15 +175,13 @@ def current_signal(label, symbol):
             tp = entry + tp_points * pip_factor
             sl = entry - sl_points * pip_factor
             alert = format_alert(label, "BUY", entry, tp, sl, rsi_val, pip_factor)
-            status = f"{label}: BUY confirmado (vela {last_ts})"
-            return alert, status
+            return alert, f"{label}: BUY confirmado (vela {last_ts})"
 
         if sell:
             tp = entry - tp_points * pip_factor
             sl = entry + sl_points * pip_factor
             alert = format_alert(label, "SELL", entry, tp, sl, rsi_val, pip_factor)
-            status = f"{label}: SELL confirmado (vela {last_ts})"
-            return alert, status
+            return alert, f"{label}: SELL confirmado (vela {last_ts})"
 
     return None, f"{label}: sin señal en la última vela (vela {last_ts})"
 
