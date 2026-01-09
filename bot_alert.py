@@ -136,9 +136,9 @@ def current_signal(label, symbol):
     last_ts = df.index[i]  # aware UTC
     now_utc = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)  # aware UTC
 
-    # Filtro: descartar si la vela evaluada es más antigua que la última esperada
-    if last_ts < now_utc - timedelta(hours=1):
-        return None, f"{label}: señal descartada por vela antigua ({last_ts})"
+    # Aceptar la última vela si no es más vieja de 3 horas
+    if last_ts < now_utc - timedelta(hours=3):
+        return None, f"{label}: señal descartada por vela demasiado antigua ({last_ts})"
 
     # Contexto de las últimas 3 velas
     c_last3 = df["close"].iloc[i-3:i]
