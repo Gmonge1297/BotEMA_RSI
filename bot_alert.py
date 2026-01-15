@@ -84,15 +84,24 @@ def get_h1(symbol, days=10):
     if df.empty:
         return df
 
-    df["timestamp"] = pd.to_datetime(df["t"], unit="ms", utc=True)
+    # 🔑 Polygon puede devolver 't' o 'timestamp'
+    if "t" in df.columns:
+        df["timestamp"] = pd.to_datetime(df["t"], unit="ms", utc=True)
+    elif "timestamp" in df.columns:
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+    else:
+        raise ValueError("No se encontró columna de timestamp en Polygon")
+
     df.set_index("timestamp", inplace=True)
 
-    return df.rename(columns={
+    df = df.rename(columns={
         "o": "open",
         "h": "high",
         "l": "low",
         "c": "close"
-    })[["open", "high", "low", "close"]].dropna()
+    })
+
+    return df[["open", "high", "low", "close"]].dropna()
 
 # ================= RIESGO =================
 def calc_lot(sl_pips):
