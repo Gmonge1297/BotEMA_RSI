@@ -17,29 +17,27 @@ PARES = [
     ("XAUUSD", "C:XAUUSD"),
 ]
 
-# Parámetros FX
+# SL / TP
 TP_PIPS = 30
 SL_PIPS = 20
 
-# Parámetros Oro
 TP_XAU = 800
 SL_XAU = 500
 
-# Riesgo y balance
-BALANCE = float(os.getenv("ACCOUNT_BALANCE", "1000"))
-RISK_PERCENT = float(os.getenv("RISK_PERCENT", "0.15"))
-PIP_VALUE_PER_LOT = float(os.getenv("PIP_VALUE_PER_LOT", "10"))
+# 🔒 RIESGO FIJO
+FIXED_RISK_USD = 1.50
+PIP_VALUE_PER_LOT = 10  # FX estándar
 
 # Email
 EMAIL_USER = os.getenv("EMAIL_USER")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_TO = os.getenv("EMAIL_TO")
-SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "465"))
+SMTP_SERVER = "smtp.gmail.com"
+SMTP_PORT = 465
 
 # ================= INDICADORES =================
 def ema(series, span):
-    return pd.Series(series).astype(float).ewm(span=span, adjust=False).mean()
+    return series.ewm(span=span, adjust=False).mean()
 
 def rsi(series, period=14):
     delta = series.diff()
@@ -48,39 +46,31 @@ def rsi(series, period=14):
     avg_gain = gain.rolling(period).mean()
     avg_loss = loss.rolling(period).mean()
     rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi_v = 100 - (100 / (1 + rs))
-    return rsi_v.fillna(50)
+    return (100 - (100 / (1 + rs))).fillna(50)
 
 def adx(df, period=14):
-    high = df["high"]
-    low = df["low"]
-    close = df["close"]
-
-    up_move = high.diff()
-    down_move = (low.diff() * -1)
-
-    plus_dm = np.where((up_move > 0) & (up_move > down_move), up_move, 0.0)
-    minus_dm = np.where((down_move > 0) & (down_move > up_move), down_move, 0.0)
-
+    high, low, close = df["high"], df["low"], df["close"]
+    up = high.diff()
+    down = -low.diff()
+    plus_dm = np.where((up > down) & (up > 0), up, 0)
+    minus_dm = np.where((down > up) & (down > 0), down, 0)
     tr = pd.concat([
-        (high - low),
-        (high - close.shift(1)).abs(),
-        (low - close.shift(1)).abs()
+        high - low,
+        (high - close.shift()).abs(),
+        (low - close.shift()).abs()
     ], axis=1).max(axis=1)
-
     atr = tr.rolling(period).mean()
-
     plus_di = 100 * (pd.Series(plus_dm).rolling(period).mean() / atr)
     minus_di = 100 * (pd.Series(minus_dm).rolling(period).mean() / atr)
     dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
-    adx_v = dx.rolling(period).mean()
-    return adx_v.fillna(20)
+    return dx.rolling(period).mean().fillna(20)
 
 # ================= DATOS =================
-def get_h1(symbol: str, days: int = 10) -> pd.DataFrame:
+def get_h1(symbol, days=10):
     client = RESTClient(POLYGON_API_KEY)
     to_date = datetime.now(timezone.utc)
     from_date = to_date - timedelta(days=days)
+
     aggs = client.get_aggs(
         ticker=symbol,
         multiplier=1,
@@ -89,123 +79,107 @@ def get_h1(symbol: str, days: int = 10) -> pd.DataFrame:
         to=to_date.date(),
         limit=50000,
     )
+
     df = pd.DataFrame(aggs)
     if df.empty:
         return df
-    ts_col = "timestamp" if "timestamp" in df.columns else "t"
-    df["timestamp"] = pd.to_datetime(df[ts_col], unit="ms", utc=True)
+
+    df["timestamp"] = pd.to_datetime(df["t"], unit="ms", utc=True)
     df.set_index("timestamp", inplace=True)
-    col_map = {"o": "open", "h": "high", "l": "low", "c": "close"}
-    df = df.rename(columns=col_map)
-    return df[["open", "high", "low", "close"]].dropna()
 
-# ================= RIESGO / LOTE =================
-def calc_lot(entry, sl, pip_factor, balance=BALANCE, risk_percent=RISK_PERCENT, pip_value_per_lot=PIP_VALUE_PER_LOT):
-    stop_distance_price = abs(entry - sl)
-    stop_distance_pips = stop_distance_price / pip_factor if pip_factor > 0 else 0
-    risk_amount = balance * (risk_percent / 100.0)
-    lot = risk_amount / (max(stop_distance_pips, 1e-6) * pip_value_per_lot)
-    return round(risk_amount, 2), round(lot, 2)
+    return df.rename(columns={
+        "o": "open",
+        "h": "high",
+        "l": "low",
+        "c": "close"
+    })[["open", "high", "low", "close"]].dropna()
 
-def format_alert(label, side, entry, tp, sl, rsi_val, pip_factor):
-    risk_amount, lot = calc_lot(entry, sl, pip_factor)
-    arrow = "📈" if side == "BUY" else "📉"
-    return (
-        f"{arrow} {side} Confirmado {label}\n\n"
-        f"Entrada: {entry}\n"
-        f"SL: {sl}\n"
-        f"TP: {tp}\n"
-        f"RSI: {round(rsi_val, 1)}\n"
-        f"Riesgo aprox: ${risk_amount}\n"
-        f"Lote sugerido: {lot}\n"
-    )
+# ================= RIESGO =================
+def calc_lot(sl_pips):
+    lot = FIXED_RISK_USD / (sl_pips * PIP_VALUE_PER_LOT)
+    return round(lot, 2)
 
-# ================= SEÑAL ACTUAL =================
+# ================= SEÑAL =================
 def current_signal(label, symbol):
     df = get_h1(symbol)
-    min_bars = 80 if label == "XAUUSD" else 60
-    if df.empty or len(df) < min_bars:
-        return None, f"{label}: ⚠️ Datos insuficientes ({len(df)} velas)"
+
+    if df.empty or len(df) < 60:
+        return None, f"{label}: datos insuficientes"
 
     ema20 = ema(df["close"], 20)
     ema50 = ema(df["close"], 50)
-    rsi_v = rsi(df["close"], 14)
+    rsi_v = rsi(df["close"])
     adx_v = adx(df)
 
-    i = len(df) - 1
-    last_ts = df.index[i]  # aware UTC
-    now_utc = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)  # aware UTC
+    i = len(df) - 2  # ✅ vela cerrada
+    last_ts = df.index[i]
 
-    # Aceptar la última vela si no es más vieja de 3 horas
-    if last_ts < now_utc - timedelta(hours=3):
-        return None, f"{label}: señal descartada por vela demasiado antigua ({last_ts})"
-
-    # Contexto de las últimas 3 velas
-    c_last3 = df["close"].iloc[i-3:i]
-    o_last3 = df["open"].iloc[i-3:i]
-    ema20_last3 = ema20.iloc[i-3:i]
-    ema50_last3 = ema50.iloc[i-3:i]
-    rsi_last3 = rsi_v.iloc[i-3:i]
+    closes = df["close"].iloc[i-2:i+1]
+    opens = df["open"].iloc[i-2:i+1]
 
     buy = (
-        all(ema20_last3 > ema50_last3) and
-        rsi_last3.mean() > 50 and
-        sum(c_last3 > o_last3) >= 2
+        all(ema20.iloc[i-2:i+1] > ema50.iloc[i-2:i+1]) and
+        rsi_v.iloc[i-2:i+1].mean() > 50 and
+        sum(closes > opens) >= 2
     )
+
     sell = (
-        all(ema20_last3 < ema50_last3) and
-        rsi_last3.mean() < 50 and
-        sum(c_last3 < o_last3) >= 2
+        all(ema20.iloc[i-2:i+1] < ema50.iloc[i-2:i+1]) and
+        rsi_v.iloc[i-2:i+1].mean() < 50 and
+        sum(closes < opens) >= 2
     )
 
-    # Filtro oro con ADX suavizado
-    if label == "XAUUSD" and adx_v.rolling(3).mean().iloc[i] < 18:
-        buy, sell = False, False
+    # Filtro solo para oro
+    if label == "XAUUSD" and adx_v.iloc[i] < 18:
+        buy = sell = False
 
-    if buy or sell:
-        entry = df["close"].iloc[i]
-        rsi_val = rsi_v.iloc[i]
+    if not (buy or sell):
+        return None, f"{label}: sin señal"
 
-        if label == "XAUUSD":
-            tp_points, sl_points, pip_factor = TP_XAU, SL_XAU, 1.0
-        else:
-            tp_points, sl_points, pip_factor = TP_PIPS, SL_PIPS, 0.0001
+    entry = df["close"].iloc[i]
 
-        if buy:
-            tp = entry + tp_points * pip_factor
-            sl = entry - sl_points * pip_factor
-            alert = format_alert(label, "BUY", entry, tp, sl, rsi_val, pip_factor)
-            return alert, f"{label}: BUY confirmado (vela {last_ts})"
+    if label == "XAUUSD":
+        sl_points, tp_points, pip_factor = SL_XAU, TP_XAU, 1
+    else:
+        sl_points, tp_points, pip_factor = SL_PIPS, TP_PIPS, 0.0001
 
-        if sell:
-            tp = entry - tp_points * pip_factor
-            sl = entry + sl_points * pip_factor
-            alert = format_alert(label, "SELL", entry, tp, sl, rsi_val, pip_factor)
-            return alert, f"{label}: SELL confirmado (vela {last_ts})"
+    lot = calc_lot(sl_points)
 
-    return None, f"{label}: sin señal en la última vela (vela {last_ts})"
+    if buy:
+        side = "BUY"
+        sl = entry - sl_points * pip_factor
+        tp = entry + tp_points * pip_factor
+    else:
+        side = "SELL"
+        sl = entry + sl_points * pip_factor
+        tp = entry - tp_points * pip_factor
+
+    alert = (
+        f"{side} {label}\n\n"
+        f"Entrada: {entry}\n"
+        f"SL: {sl}\n"
+        f"TP: {tp}\n"
+        f"Lote sugerido: {lot}\n"
+        f"Riesgo máximo: $1.50\n"
+        f"Vela: {last_ts}"
+    )
+
+    return alert, f"{label}: {side} confirmado"
 
 # ================= EMAIL =================
 def send_email(subject, body):
-    if not (EMAIL_USER and EMAIL_PASSWORD and EMAIL_TO):
-        return "⚠️ Email no configurado (EMAIL_USER/EMAIL_PASSWORD/EMAIL_TO)"
     msg = MIMEText(body)
-    msg["Subject"] = subject
     msg["From"] = EMAIL_USER
     msg["To"] = EMAIL_TO
-    try:
-        with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT) as server:
-            server.login(EMAIL_USER, EMAIL_PASSWORD)
-            server.sendmail(EMAIL_USER, EMAIL_TO, msg.as_string())
-        return "✅ Email enviado"
-    except Exception as e:
-        return f"⚠️ Error enviando email: {e}"
+    msg["Subject"] = subject
+
+    with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT) as server:
+        server.login(EMAIL_USER, EMAIL_PASSWORD)
+        server.sendmail(EMAIL_USER, EMAIL_TO, msg.as_string())
 
 # ================= MAIN =================
 if __name__ == "__main__":
-    print("=== ALERTAS EMA20/50 + RSI (últimas 3 velas, con ADX en oro) ===")
-
-    # Esperar 30s para asegurar que la vela H1 cerrada esté publicada
+    print("=== BOT EMA20/50 + RSI | RIESGO FIJO $1.50 ===")
     time.sleep(30)
 
     any_alert = False
@@ -215,19 +189,12 @@ if __name__ == "__main__":
             alert, status = current_signal(label, symbol)
             print(status)
 
-            # Enviar un correo por par si hay señal
             if alert:
                 any_alert = True
-                subject = f"Señal {label} (Tiempo real)"
-                body = f"{status}\n\n--- {label} ---\n{alert}"
-                status_email = send_email(subject, body)
-                print(f"{label} EMAIL: {status_email}")
-
-            # Pausa corta entre pares para evitar rate limits
-            time.sleep(10)
+                send_email(f"Señal {label}", alert)
 
         except Exception as e:
-            print(f"{label}: ⚠️ Error {e}")
+            print(f"{label}: error {e}")
 
     if not any_alert:
         print("Sin señales recientes.")
