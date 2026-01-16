@@ -107,7 +107,28 @@ def get_h1(symbol, days=10):
 def calc_lot(sl_pips):
     lot = FIXED_RISK_USD / (sl_pips * PIP_VALUE_PER_LOT)
     return round(lot, 2)
+def format_alert(label, side, entry, tp, sl, rsi_val, pip_factor):
+    RISK_FIXED = 1.50  # dólares, fijo
 
+    stop_distance_price = abs(entry - sl)
+    stop_distance_pips = stop_distance_price / pip_factor if pip_factor > 0 else 0
+
+    # Valor pip estándar
+    pip_value = PIP_VALUE_PER_LOT
+
+    lot = RISK_FIXED / (max(stop_distance_pips, 1e-6) * pip_value)
+    lot = round(max(lot, 0.01), 2)  # mínimo 0.01
+
+    arrow = "📉" if side == "SELL" else "📈"
+
+    return (
+        f"{arrow} {side} {label}\n\n"
+        f"Entrada: {round(entry, 5)}\n"
+        f"SL: {round(sl, 5)}\n"
+        f"TP: {round(tp, 5)}\n"
+        f"Lote sugerido: {lot}\n"
+        f"Riesgo máximo: $1.50\n"
+    )
 # ================= SEÑAL =================
 def current_signal(label, symbol):
     df = get_h1(symbol)
