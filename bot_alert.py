@@ -117,75 +117,87 @@ def current_signal(label, symbol):
 
     ema20 = ema(df["close"], 20)
     ema50 = ema(df["close"], 50)
-    rsi_v = rsi(df["close"])
+    rsi_v = rsi(df["close"], 14)
     adx_v = adx(df)
 
-    i = len(df) - 2  # ✅ vela cerrada
-    last_ts = df.index[i]
+    i = len(df) - 1
+    candle = df.iloc[i]
 
-    closes = df["close"].iloc[i-2:i+1]
-    opens = df["open"].iloc[i-2:i+1]
+    open_p = candle["open"]
+    high_p = candle["high"]
+    low_p = candle["low"]
+    close_p = candle["close"]
+    ts = df.index[i]
+
+    # Contexto últimas 3 velas
+    ema20_3 = ema20.iloc[i-3:i]
+    ema50_3 = ema50.iloc[i-3:i]
+    rsi_3 = rsi_v.iloc[i-3:i]
+    closes_3 = df["close"].iloc[i-3:i]
+    opens_3 = df["open"].iloc[i-3:i]
 
     buy = (
-        all(ema20.iloc[i-2:i+1] > ema50.iloc[i-2:i+1]) and
-        rsi_v.iloc[i-2:i+1].mean() > 50 and
-        sum(closes > opens) >= 2
+        all(ema20_3 > ema50_3) and
+        rsi_3.mean() > 50 and
+        sum(closes_3 > opens_3) >= 2
     )
 
     sell = (
-        all(ema20.iloc[i-2:i+1] < ema50.iloc[i-2:i+1]) and
-        rsi_v.iloc[i-2:i+1].mean() < 50 and
-        sum(closes < opens) >= 2
+        all(ema20_3 < ema50_3) and
+        rsi_3.mean() < 50 and
+        sum(closes_3 < opens_3) >= 2
     )
 
-    # Filtro solo para oro
-    if label == "XAUUSD" and adx_v.iloc[i] < 18:
+    # Filtro oro con ADX
+    if label == "XAUUSD" and adx_v.rolling(3).mean().iloc[i] < 18:
         buy = sell = False
 
     if not (buy or sell):
         return None, f"{label}: sin señal"
 
-    entry = df["close"].iloc[i]
-
+    # Parámetros
     if label == "XAUUSD":
-        sl_points, tp_points, pip_factor = SL_XAU, TP_XAU, 1
+        pip_factor = 1.0
+        sl_pips = SL_XAU
+        tp_pips = TP_XAU
     else:
-        sl_points, tp_points, pip_factor = SL_PIPS, TP_PIPS, 0.0001
+        pip_factor = 0.0001
+        sl_pips = SL_PIPS
+        tp_pips = TP_PIPS
 
-    lot = calc_lot(sl_points)
+    entry = close_p
 
+    # Confirmación SEMI-LIVE (toque intra-vela)
+    if buy and low_p > entry:
+        return None, f"{label}: BUY no tocado por precio"
+
+    if sell and high_p < entry:
+        return None, f"{label}: SELL no tocado por precio"
+
+    # Precio actual (último close disponible)
+    current_price = close_p
+
+    # No entrar tarde (máx 25% del SL)
+    max_deviation = sl_pips * pip_factor * 0.25
+
+    if buy and abs(current_price - entry) > max_deviation:
+        return None, f"{label}: BUY descartado (precio lejos)"
+
+    if sell and abs(current_price - entry) > max_deviation:
+        return None, f"{label}: SELL descartado (precio lejos)"
+
+    # SL / TP
     if buy:
-        side = "BUY"
-        sl = entry - sl_points * pip_factor
-        tp = entry + tp_points * pip_factor
-    else:
-        side = "SELL"
-        sl = entry + sl_points * pip_factor
-        tp = entry - tp_points * pip_factor
+        sl = entry - sl_pips * pip_factor
+        tp = entry + tp_pips * pip_factor
+        alert = format_alert(label, "BUY", entry, tp, sl, rsi_v.iloc[i], pip_factor)
+        return alert, f"{label}: BUY confirmado (vela {ts})"
 
-    alert = (
-        f"{side} {label}\n\n"
-        f"Entrada: {entry}\n"
-        f"SL: {sl}\n"
-        f"TP: {tp}\n"
-        f"Lote sugerido: {lot}\n"
-        f"Riesgo máximo: $1.50\n"
-        f"Vela: {last_ts}"
-    )
-
-    return alert, f"{label}: {side} confirmado"
-
-# ================= EMAIL =================
-def send_email(subject, body):
-    msg = MIMEText(body)
-    msg["From"] = EMAIL_USER
-    msg["To"] = EMAIL_TO
-    msg["Subject"] = subject
-
-    with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT) as server:
-        server.login(EMAIL_USER, EMAIL_PASSWORD)
-        server.sendmail(EMAIL_USER, EMAIL_TO, msg.as_string())
-
+    if sell:
+        sl = entry + sl_pips * pip_factor
+        tp = entry - tp_pips * pip_factor
+        alert = format_alert(label, "SELL", entry, tp, sl, rsi_v.iloc[i], pip_factor)
+        return alert, f"{label}: SELL confirmado (vela {ts})"
 # ================= MAIN =================
 if __name__ == "__main__":
     print("=== BOT EMA20/50 + RSI | RIESGO FIJO $1.50 ===")
