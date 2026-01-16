@@ -219,6 +219,23 @@ def current_signal(label, symbol):
         tp = entry - tp_pips * pip_factor
         alert = format_alert(label, "SELL", entry, tp, sl, rsi_v.iloc[i], pip_factor)
         return alert, f"{label}: SELL confirmado (vela {ts})"
+
+def send_email(subject, body):
+    if not EMAIL_USER or not EMAIL_PASSWORD or not EMAIL_TO:
+        return "Email no configurado"
+
+    msg = MIMEText(body)
+    msg["Subject"] = subject
+    msg["From"] = EMAIL_USER
+    msg["To"] = EMAIL_TO
+
+    try:
+        with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT) as server:
+            server.login(EMAIL_USER, EMAIL_PASSWORD)
+            server.sendmail(EMAIL_USER, EMAIL_TO, msg.as_string())
+        return "Email enviado correctamente"
+    except Exception as e:
+        return f"Error enviando email: {e}"
 # ================= MAIN =================
 if __name__ == "__main__":
     print("=== BOT EMA20/50 + RSI | RIESGO FIJO $1.50 ===")
