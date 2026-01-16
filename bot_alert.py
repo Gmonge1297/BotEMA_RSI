@@ -129,6 +129,17 @@ def format_alert(label, side, entry, tp, sl, rsi_val, pip_factor):
         f"Lote sugerido: {lot}\n"
         f"Riesgo máximo: $1.50\n"
     )
+
+def is_entry_valid(entry, current_price, label):
+    """
+    Verifica si la señal sigue siendo operable
+    """
+    diff = abs(current_price - entry)
+
+    if label == "XAUUSD":
+        return diff <= 0.30   # Máx $0.30 en oro
+    else:
+        return diff <= 0.0003 # Máx 3 pips en forex
 # ================= SEÑAL =================
 def current_signal(label, symbol):
     df = get_h1(symbol)
