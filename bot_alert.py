@@ -201,26 +201,27 @@ def send_email(subject, body):
 if __name__ == "__main__":
     print("=== BOT EN TIEMPO REAL EMA20/50 + RSI ===")
 
-    while True:
-        any_alert = False
+    if __name__ == "__main__":
+    print("=== BOT EMA20/50 + RSI (GitHub Scheduler) ===")
 
-        for label, symbol in PARES:
-            try:
-                alert, status = current_signal(label, symbol)
-                print(status)
+    any_alert = False
 
-                if alert:
-                    any_alert = True
-                    subject = f"Señal {label}"
-                    body = f"{status}\n\n{alert}"
-                    print(send_email(subject, body))
+    for label, symbol in PARES:
+        try:
+            alert, status = current_signal(label, symbol)
+            print(status)
 
-                time.sleep(2)
+            if alert:
+                any_alert = True
+                subject = f"Señal {label}"
+                body = f"{status}\n\n{alert}"
+                email_status = send_email(subject, body)
+                print(f"{label}: {email_status}")
 
-            except Exception as e:
-                print(f"{label}: error {e}")
+        except Exception as e:
+            print(f"{label}: error {e}")
 
-        if not any_alert:
-            print("Sin señales ahora.")
+    if not any_alert:
+        print("Sin señales en esta ejecución.")
 
-        time.sleep(120)  # revisa cada 2 minutos
+    print("Bot finalizado correctamente.")  # revisa cada 2 minutos
