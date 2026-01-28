@@ -165,26 +165,33 @@ def current_signal(label, symbol):
     if not (buy or sell):
         return None, f"{label}: sin señal"
 
+        # Parámetros según activo
     if label == "XAUUSD":
-    pip_factor = 1.0
-    sl_pips = SL_XAU
-    tp_pips = TP_XAU
+        pip_factor = 1.0
+        sl_pips = SL_XAU
+        tp_pips = TP_XAU
+    elif "JPY" in label:
+        pip_factor = 0.01
+        sl_pips = SL_PIPS
+        tp_pips = TP_PIPS
+    else:
+        pip_factor = 0.0001
+        sl_pips = SL_PIPS
+        tp_pips = TP_PIPS
 
-elif "JPY" in label:
-    pip_factor = 0.01   # 🔥 pares con JPY
-
-else:
-    pip_factor = 0.0001 # 🔥 pares normales
-
+    # Calcular SL y TP
     if buy:
         sl = entry - sl_pips * pip_factor
         tp = entry + tp_pips * pip_factor
         alert = format_alert(label, "BUY", entry, tp, sl, pip_factor)
 
-    if sell:
+    elif sell:
         sl = entry + sl_pips * pip_factor
         tp = entry - tp_pips * pip_factor
         alert = format_alert(label, "SELL", entry, tp, sl, pip_factor)
+
+    else:
+        return None, f"{label}: error interno"
 
     mark_sent(label, ts)
     return alert, f"{label}: señal enviada"
