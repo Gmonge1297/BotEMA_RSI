@@ -166,13 +166,15 @@ def current_signal(label, symbol):
         return None, f"{label}: sin señal"
 
     if label == "XAUUSD":
-        pip_factor = 1.0
-        sl_pips = SL_XAU
-        tp_pips = TP_XAU
-    else:
-        pip_factor = 0.0001
-        sl_pips = SL_PIPS
-        tp_pips = TP_PIPS
+    pip_factor = 1.0
+    sl_pips = SL_XAU
+    tp_pips = TP_XAU
+
+elif "JPY" in label:
+    pip_factor = 0.01   # 🔥 pares con JPY
+
+else:
+    pip_factor = 0.0001 # 🔥 pares normales
 
     if buy:
         sl = entry - sl_pips * pip_factor
