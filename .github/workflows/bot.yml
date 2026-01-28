@@ -2,8 +2,8 @@ name: Forex Bot M15 Scheduler
 
 on:
   schedule:
-    - cron: '*/5 * * * *'   # ejecuta cada 5 minutos
-  workflow_dispatch:        # permite correrlo manualmente
+    - cron: '3 * * * *'   # minuto 3 de cada hora
+  workflow_dispatch:
 
 jobs:
   run-bot:
