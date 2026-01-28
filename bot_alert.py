@@ -197,8 +197,8 @@ def send_email(subject, body):
     except Exception as e:
         return f"Error email: {e}"
 
-# ================= BOT EN VIVO =================
- if __name__ == "__main__":
+# ================= MAIN (GITHUB SCHEDULER) =================
+if __name__ == "__main__":
     print("=== BOT EMA20/50 + RSI (GitHub Scheduler) ===")
 
     any_alert = False
