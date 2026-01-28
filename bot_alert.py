@@ -93,7 +93,15 @@ def get_h1(symbol, days=10):
     if df.empty:
         return df
 
-    df["timestamp"] = pd.to_datetime(df["t"], unit="ms", utc=True)
+    # 🔥 Detectar automáticamente la columna de tiempo
+    if "t" in df.columns:
+        df["timestamp"] = pd.to_datetime(df["t"], unit="ms", utc=True)
+    elif "timestamp" in df.columns:
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+    else:
+        print("Columnas recibidas de Polygon:", df.columns)
+        raise ValueError("Polygon no envió columna de tiempo válida")
+
     df.set_index("timestamp", inplace=True)
 
     df = df.rename(columns={
