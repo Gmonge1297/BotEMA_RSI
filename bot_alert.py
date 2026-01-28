@@ -17,26 +17,23 @@ PARES = [
     ("XAUUSD", "C:XAUUSD"),
 ]
 
-# SL / TP
 TP_PIPS = 30
 SL_PIPS = 20
 TP_XAU = 800
 SL_XAU = 500
 
-# 🔒 RIESGO FIJO
 FIXED_RISK_USD = 1.50
-PIP_VALUE_PER_LOT = 10  # FX estándar
+PIP_VALUE_PER_LOT = 10
 
-# Email
 EMAIL_USER = os.getenv("EMAIL_USER")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_TO = os.getenv("EMAIL_TO")
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 465
 
-# Persistencia de señales enviadas
 LAST_SIGNAL_FILE = "last_signal.txt"
 
+# ================= CONTROL DE DUPLICADOS =================
 def already_sent(label, ts):
     if not os.path.exists(LAST_SIGNAL_FILE):
         return False
@@ -96,13 +93,7 @@ def get_h1(symbol, days=10):
     if df.empty:
         return df
 
-    if "t" in df.columns:
-        df["timestamp"] = pd.to_datetime(df["t"], unit="ms", utc=True)
-    elif "timestamp" in df.columns:
-        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
-    else:
-        raise ValueError("No se encontró columna de timestamp en Polygon")
-
+    df["timestamp"] = pd.to_datetime(df["t"], unit="ms", utc=True)
     df.set_index("timestamp", inplace=True)
 
     df = df.rename(columns={
@@ -113,15 +104,12 @@ def get_h1(symbol, days=10):
     })
 
     return df[["open", "high", "low", "close"]].dropna()
-
-# ================= RIESGO =================
-def format_alert(label, side, entry, tp, sl, rsi_val, pip_factor):
+    # ================= FORMATO ALERTA =================
+def format_alert(label, side, entry, tp, sl, pip_factor):
     stop_distance_price = abs(entry - sl)
-    stop_distance_pips = stop_distance_price / pip_factor if pip_factor > 0 else 0
-    pip_value = PIP_VALUE_PER_LOT
-
-    lot = FIXED_RISK_USD / (max(stop_distance_pips, 1e-6) * pip_value)
-    lot = round(max(lot, 0.01), 2)  # mínimo 0.01
+    stop_distance_pips = stop_distance_price / pip_factor
+    lot = FIXED_RISK_USD / (stop_distance_pips * PIP_VALUE_PER_LOT)
+    lot = round(max(lot, 0.01), 2)
 
     arrow = "📉" if side == "SELL" else "📈"
 
@@ -134,10 +122,9 @@ def format_alert(label, side, entry, tp, sl, rsi_val, pip_factor):
         f"Riesgo máximo: ${FIXED_RISK_USD}\n"
     )
 
-# ================= SEÑAL =================
+# ================= LÓGICA DE SEÑAL =================
 def current_signal(label, symbol):
     df = get_h1(symbol)
-
     if df.empty or len(df) < 60:
         return None, f"{label}: datos insuficientes"
 
@@ -146,42 +133,29 @@ def current_signal(label, symbol):
     rsi_v = rsi(df["close"], 14)
     adx_v = adx(df)
 
-    i = len(df) - 1
-    candle = df.iloc[i]
+    i = len(df) - 2       # vela cerrada
+    live_i = len(df) - 1  # vela actual en formación
+
     ts = df.index[i]
-    now_utc = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    entry = df.iloc[live_i]["close"]
 
-    # Filtro de antigüedad
-    if ts < now_utc - timedelta(hours=3):
-        return None, f"{label}: vela demasiado antigua ({ts})"
-
-    # Evitar duplicados
     if already_sent(label, ts):
-        return None, f"{label}: señal ya enviada para vela {ts}"
+        return None, f"{label}: señal ya enviada"
 
-    # Contexto últimas 3 velas
     ema20_3 = ema20.iloc[i-3:i]
     ema50_3 = ema50.iloc[i-3:i]
     rsi_3 = rsi_v.iloc[i-3:i]
     closes_3 = df["close"].iloc[i-3:i]
     opens_3 = df["open"].iloc[i-3:i]
 
-    buy = (
-        all(ema20_3 > ema50_3) and
-        rsi_3.mean() > 50 and
-        sum(closes_3 > opens_3) >= 2
-    )
-    sell = (
-        all(ema20_3 < ema50_3) and
-        rsi_3.mean() < 50 and
-        sum(closes_3 < opens_3) >= 2
-    )
+    buy = all(ema20_3 > ema50_3) and rsi_3.mean() > 50 and sum(closes_3 > opens_3) >= 2
+    sell = all(ema20_3 < ema50_3) and rsi_3.mean() < 50 and sum(closes_3 < opens_3) >= 2
 
-    if label == "XAUUSD" and adx_v.rolling(3).mean().iloc[i] < 18:
+    if label == "XAUUSD" and adx_v.iloc[i] < 18:
         buy = sell = False
 
     if not (buy or sell):
-        return None, f"{label}: sin señal (vela {ts})"
+        return None, f"{label}: sin señal"
 
     if label == "XAUUSD":
         pip_factor = 1.0
@@ -192,39 +166,19 @@ def current_signal(label, symbol):
         sl_pips = SL_PIPS
         tp_pips = TP_PIPS
 
-    entry = candle["close"]
-
-    # Validación de desviación de precio
-    current_price = candle["close"]
-    max_deviation = sl_pips * pip_factor * 0.25
-    if abs(current_price - entry) > max_deviation:
-        return None, f"{label}: señal descartada, precio lejos de entrada (vela {ts})"
-
-    # SL / TP
     if buy:
         sl = entry - sl_pips * pip_factor
         tp = entry + tp_pips * pip_factor
-        if sl_pips > 100:
-            return None, f"{label}: SL demasiado amplio"
-        alert = format_alert(label, "BUY", entry, tp, sl, rsi_v.iloc[i], pip_factor)
-        mark_sent(label, ts)
-        return alert, f"{label}: BUY confirmado (vela {ts})"
+        alert = format_alert(label, "BUY", entry, tp, sl, pip_factor)
 
     if sell:
         sl = entry + sl_pips * pip_factor
         tp = entry - tp_pips * pip_factor
-        if sl_pips > 100:
-            return None, f"{label}: SL demasiado amplio"
-        alert = format_alert(label, "SELL", entry, tp, sl, rsi_v.iloc[i], pip_factor)
-        mark_sent(label, ts)
-        return alert, f"{label}: SELL confirmado (vela {ts})"
+        alert = format_alert(label, "SELL", entry, tp, sl, pip_factor)
 
-# ================= EMAIL =================
-def send_email(subject, body):
-    if not EMAIL_USER or not EMAIL_PASSWORD or not EMAIL_TO:
-        return "Email no configurado"
+    mark_sent(label, ts)
+    return alert, f"{label}: señal enviada"
 
-    msg = MIMEText
 # ================= EMAIL =================
 def send_email(subject, body):
     if not EMAIL_USER or not EMAIL_PASSWORD or not EMAIL_TO:
@@ -239,34 +193,34 @@ def send_email(subject, body):
         with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT) as server:
             server.login(EMAIL_USER, EMAIL_PASSWORD)
             server.sendmail(EMAIL_USER, EMAIL_TO, msg.as_string())
-        return "Email enviado correctamente"
+        return "Email enviado"
     except Exception as e:
-        return f"Error enviando email: {e}"
+        return f"Error email: {e}"
 
-# ================= MAIN =================
+# ================= BOT EN VIVO =================
 if __name__ == "__main__":
-    print("=== BOT EMA20/50 + RSI | RIESGO FIJO $1.50 ===")
-    # Esperar un poco para que la vela H1 esté cerrada y publicada
-    time.sleep(60)
+    print("=== BOT EN TIEMPO REAL EMA20/50 + RSI ===")
 
-    any_alert = False
+    while True:
+        any_alert = False
 
-    for label, symbol in PARES:
-        try:
-            alert, status = current_signal(label, symbol)
-            print(status)
+        for label, symbol in PARES:
+            try:
+                alert, status = current_signal(label, symbol)
+                print(status)
 
-            if alert:
-                any_alert = True
-                subject = f"Señal {label}"
-                body = f"{status}\n\n{alert}"
-                email_status = send_email(subject, body)
-                print(f"{label}: {email_status}")
+                if alert:
+                    any_alert = True
+                    subject = f"Señal {label}"
+                    body = f"{status}\n\n{alert}"
+                    print(send_email(subject, body))
 
-            time.sleep(5)  # pequeña pausa para evitar rate limits
+                time.sleep(2)
 
-        except Exception as e:
-            print(f"{label}: error {e}")
+            except Exception as e:
+                print(f"{label}: error {e}")
 
-    if not any_alert:
-        print("Sin señales recientes.")
+        if not any_alert:
+            print("Sin señales ahora.")
+
+        time.sleep(120)  # revisa cada 2 minutos
