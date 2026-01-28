@@ -144,7 +144,7 @@ def current_signal(label, symbol):
     i = len(df) - 2       # vela cerrada
     live_i = len(df) - 1  # vela actual en formación
 
-       ts = df.index[i]
+    ts = df.index[i]
     entry = df.iloc[live_i]["close"]
 
     # ⏰ SOLO operar si la vela cerró hace menos de 70 minutos
