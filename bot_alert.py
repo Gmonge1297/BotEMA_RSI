@@ -224,4 +224,4 @@ if __name__ == "__main__":
     if not any_alert:
         print("Sin señales en esta ejecución.")
 
-    print("Bot finalizado correctamente.")  # revisa cada 2 minutos
+    print("Bot finalizado correctamente.")
