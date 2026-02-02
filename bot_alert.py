@@ -5,7 +5,6 @@ from polygon import RESTClient
 import os
 import smtplib
 from email.mime.text import MIMEText
-import time
 
 # ================= CONFIGURACIÓN =================
 POLYGON_API_KEY = os.getenv("POLYGON_API_KEY")
@@ -17,23 +16,26 @@ PARES = [
     ("XAUUSD", "C:XAUUSD"),
 ]
 
+# SL / TP
 TP_PIPS = 30
 SL_PIPS = 20
 TP_XAU = 800
 SL_XAU = 500
 
+# 🔒 RIESGO FIJO
 FIXED_RISK_USD = 1.50
-PIP_VALUE_PER_LOT = 10
+PIP_VALUE_PER_LOT = 10  # valor estándar forex
 
+# Email
 EMAIL_USER = os.getenv("EMAIL_USER")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_TO = os.getenv("EMAIL_TO")
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 465
 
+# Control de señales enviadas
 LAST_SIGNAL_FILE = "last_signal.txt"
 
-# ================= CONTROL DE DUPLICADOS =================
 def already_sent(label, ts):
     if not os.path.exists(LAST_SIGNAL_FILE):
         return False
@@ -74,9 +76,10 @@ def adx(df, period=14):
     dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
     return dx.rolling(period).mean().fillna(20)
 
-# ================= DATOS =================
+# ================= DATOS H1 =================
 def get_h1(symbol, days=10):
     client = RESTClient(POLYGON_API_KEY)
+
     to_date = datetime.now(timezone.utc)
     from_date = to_date - timedelta(days=days)
 
@@ -93,14 +96,12 @@ def get_h1(symbol, days=10):
     if df.empty:
         return df
 
-    # 🔥 Detectar automáticamente la columna de tiempo
     if "t" in df.columns:
         df["timestamp"] = pd.to_datetime(df["t"], unit="ms", utc=True)
     elif "timestamp" in df.columns:
         df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
     else:
-        print("Columnas recibidas de Polygon:", df.columns)
-        raise ValueError("Polygon no envió columna de tiempo válida")
+        raise ValueError("Polygon no devolvió timestamp")
 
     df.set_index("timestamp", inplace=True)
 
@@ -112,27 +113,28 @@ def get_h1(symbol, days=10):
     })
 
     return df[["open", "high", "low", "close"]].dropna()
-    # ================= FORMATO ALERTA =================
+    # ================= RIESGO =================
 def format_alert(label, side, entry, tp, sl, pip_factor):
-    stop_distance_price = abs(entry - sl)
-    stop_distance_pips = stop_distance_price / pip_factor
-    lot = FIXED_RISK_USD / (stop_distance_pips * PIP_VALUE_PER_LOT)
+    stop_distance = abs(entry - sl)
+    stop_pips = stop_distance / pip_factor
+    lot = FIXED_RISK_USD / (stop_pips * PIP_VALUE_PER_LOT)
     lot = round(max(lot, 0.01), 2)
 
-    arrow = "📉" if side == "SELL" else "📈"
+    arrow = "📈" if side == "BUY" else "📉"
 
     return (
         f"{arrow} {side} {label}\n\n"
-        f"Entrada: {round(entry, 5)}\n"
-        f"SL: {round(sl, 5)}\n"
-        f"TP: {round(tp, 5)}\n"
+        f"Entrada: {round(entry,5)}\n"
+        f"SL: {round(sl,5)}\n"
+        f"TP: {round(tp,5)}\n"
         f"Lote sugerido: {lot}\n"
         f"Riesgo máximo: ${FIXED_RISK_USD}\n"
     )
 
-# ================= LÓGICA DE SEÑAL =================
+# ================= SEÑAL CLÁSICA H1 =================
 def current_signal(label, symbol):
     df = get_h1(symbol)
+
     if df.empty or len(df) < 60:
         return None, f"{label}: datos insuficientes"
 
@@ -141,16 +143,12 @@ def current_signal(label, symbol):
     rsi_v = rsi(df["close"], 14)
     adx_v = adx(df)
 
-    i = len(df) - 2       # vela cerrada
-    live_i = len(df) - 1  # vela actual en formación
-
+    i = len(df) - 2  # 🔥 última vela CERRADA
     ts = df.index[i]
-    entry = df.iloc[live_i]["close"]
 
-    # ⏰ SOLO operar si la vela cerró hace menos de 70 minutos
     now = datetime.now(timezone.utc)
     if now - ts > timedelta(minutes=70):
-        return None, f"{label}: señal vieja ignorada ({ts})"
+        return None, f"{label}: vela vieja ignorada ({ts})"
 
     if already_sent(label, ts):
         return None, f"{label}: señal ya enviada"
@@ -170,7 +168,8 @@ def current_signal(label, symbol):
     if not (buy or sell):
         return None, f"{label}: sin señal"
 
-        # Parámetros según activo
+    entry = df["close"].iloc[i]
+
     if label == "XAUUSD":
         pip_factor = 1.0
         sl_pips = SL_XAU
@@ -184,22 +183,18 @@ def current_signal(label, symbol):
         sl_pips = SL_PIPS
         tp_pips = TP_PIPS
 
-    # Calcular SL y TP
     if buy:
         sl = entry - sl_pips * pip_factor
         tp = entry + tp_pips * pip_factor
         alert = format_alert(label, "BUY", entry, tp, sl, pip_factor)
 
-    elif sell:
+    if sell:
         sl = entry + sl_pips * pip_factor
         tp = entry - tp_pips * pip_factor
         alert = format_alert(label, "SELL", entry, tp, sl, pip_factor)
 
-    else:
-        return None, f"{label}: error interno"
-
     mark_sent(label, ts)
-    return alert, f"{label}: señal enviada"
+    return alert, f"{label}: señal confirmada en vela cerrada {ts}"
 
 # ================= EMAIL =================
 def send_email(subject, body):
@@ -215,13 +210,13 @@ def send_email(subject, body):
         with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT) as server:
             server.login(EMAIL_USER, EMAIL_PASSWORD)
             server.sendmail(EMAIL_USER, EMAIL_TO, msg.as_string())
-        return "Email enviado"
+        return "Email enviado correctamente"
     except Exception as e:
-        return f"Error email: {e}"
+        return f"Error enviando email: {e}"
 
-# ================= MAIN (GITHUB SCHEDULER) =================
+# ================= MAIN =================
 if __name__ == "__main__":
-    print("=== BOT EMA20/50 + RSI (GitHub Scheduler) ===")
+    print("=== BOT CLÁSICO H1 EMA20/50 + RSI ===")
 
     any_alert = False
 
@@ -232,15 +227,12 @@ if __name__ == "__main__":
 
             if alert:
                 any_alert = True
-                subject = f"Señal {label}"
+                subject = f"Señal {label} H1"
                 body = f"{status}\n\n{alert}"
-                email_status = send_email(subject, body)
-                print(f"{label}: {email_status}")
+                print(send_email(subject, body))
 
         except Exception as e:
             print(f"{label}: error {e}")
 
     if not any_alert:
         print("Sin señales en esta ejecución.")
-
-    print("Bot finalizado correctamente.")
